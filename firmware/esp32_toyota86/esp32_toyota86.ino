@@ -45,6 +45,7 @@ void emergencyStop() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(15); // パース待機を15msに短縮 (1000msブロッキングによるウォッチドッグ誤作動を防止)
 
   // LEDC チャンネル設定 (ESP32 core 2.x/3.x 互換)
   #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
