@@ -1,117 +1,146 @@
 /**
- * ジョーゼン 1/16 トヨタ86 (JRVC015-RD) 自動運転ファームウェア v2.0
- * Phone-as-a-Brain (Galaxy Note 10+) 連携版
+ * ジョーゼン 1/16 トヨタ86 (JRVC015-RD) 自動運転ファームウェア v2.1 (ESP32完全対応版)
  *
- * 特徴:
- * 1. 400ms 通信途絶時の自動緊急ブレーキ (Fail-Safe Watchdog)
- * 2. 急発進・急制動によるスリップやカメラブレを防ぐスムーズ加減速 (Slew Rate Limiting)
- * 3. 前後4WDモーター ＋ ステアリングPWM制御
- *
- * 対応マイコン: ESP32 または Arduino Nano (USBシリアル 115200bps)
+ * 【重要修正】
+ * 1. ESP32で安全に使える GPIO 16, 17, 18, 19 にピンを再配置 (GPIO 6-11のSPIフラッシュ衝突を回避)
+ * 2. ESP32のハードウェアPWM (LEDC) を使用
+ * 3. 電源分離対応: ESP32はスマホのUSB-Cから給電、モーターはラジコンの単3×6本から給電 (GND共通)
+ * 4. 速度リミッター: 室内安全のため最大速度を PWM 160 に制限
+ * 5. 通信途絶時の自動緊急ブレーキ (400ms Watchdog)
  */
 
-// モータードライバー (DRV8833 / L298N) ピン設定
-const int PIN_DRIVE_PWM1 = 5;  // 走行 前進 (PWM)
-const int PIN_DRIVE_PWM2 = 6;  // 走行 後退 (PWM)
-const int PIN_STEER_PWM1 = 9;  // 操舵 左折 (PWM)
-const int PIN_STEER_PWM2 = 10; // 操舵 右折 (PWM)
+#include <Arduino.h>
 
-// 速度制御用変数 (スムージング)
-int currentDrive = 0;
-int targetDrive = 0;
-int currentSteer = 0;
-int targetSteer = 0;
+// --- ピン配置 (ESP32-WROOM-32 安全ピン) ---
+const int PIN_DRIVE_IN1 = 16; // 走行 前進 (L298N IN1)
+const int PIN_DRIVE_IN2 = 17; // 走行 後退 (L298N IN2)
+const int PIN_STEER_IN3 = 18; // 操舵 左折 (L298N IN3)
+const int PIN_STEER_IN4 = 19; // 操舵 右折 (L298N IN4)
 
+// --- PWM 設定 (ESP32 LEDC) ---
+const int PWM_FREQ = 1000;    // 1kHz
+const int PWM_RES  = 8;       // 8bit (0 - 255)
+const int CH_DRIVE1 = 0;
+const int CH_DRIVE2 = 1;
+const int CH_STEER1 = 2;
+const int CH_STEER2 = 3;
+
+// 室内走行用 安全スピード上限 (最大255中、160に制限)
+const int MAX_DRIVE_PWM = 160;
+
+// 通信途絶監視タイマー
 unsigned long lastCmdTime = 0;
-const unsigned long TIMEOUT_MS = 400; // 400ms信号が来なければ自動緊急停止
+const unsigned long TIMEOUT_MS = 400;
+
+// ステアリング過熱保護 (トイラジコンの振り切りステアリングを過熱から守る)
+unsigned long steerStartTime = 0;
+const unsigned long MAX_STEER_HOLD_MS = 600; // 0.6秒以上連続でハンドルを切り続けない
+
+void emergencyStop() {
+  ledcWrite(CH_DRIVE1, 0);
+  ledcWrite(CH_DRIVE2, 0);
+  ledcWrite(CH_STEER1, 0);
+  ledcWrite(CH_STEER2, 0);
+}
 
 void setup() {
   Serial.begin(115200);
-  pinMode(PIN_DRIVE_PWM1, OUTPUT);
-  pinMode(PIN_DRIVE_PWM2, OUTPUT);
-  pinMode(PIN_STEER_PWM1, OUTPUT);
-  pinMode(PIN_STEER_PWM2, OUTPUT);
+
+  // LEDC チャンネル設定 (ESP32 core 2.x/3.x 互換)
+  #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+    ledcAttach(PIN_DRIVE_IN1, PWM_FREQ, PWM_RES);
+    ledcAttach(PIN_DRIVE_IN2, PWM_FREQ, PWM_RES);
+    ledcAttach(PIN_STEER_IN3, PWM_FREQ, PWM_RES);
+    ledcAttach(PIN_STEER_IN4, PWM_FREQ, PWM_RES);
+  #else
+    ledcSetup(CH_DRIVE1, PWM_FREQ, PWM_RES);
+    ledcSetup(CH_DRIVE2, PWM_FREQ, PWM_RES);
+    ledcSetup(CH_STEER1, PWM_FREQ, PWM_RES);
+    ledcSetup(CH_STEER2, PWM_FREQ, PWM_RES);
+    ledcAttachPin(PIN_DRIVE_IN1, CH_DRIVE1);
+    ledcAttachPin(PIN_DRIVE_IN2, CH_DRIVE2);
+    ledcAttachPin(PIN_STEER_IN3, CH_STEER1);
+    ledcAttachPin(PIN_STEER_IN4, CH_STEER2);
+  #endif
+
   emergencyStop();
-  Serial.println("TOYOTA86_FIRMWARE_V2_ONLINE");
+  Serial.println("TOYOTA86_ESP32_LEDC_ONLINE");
 }
 
-void emergencyStop() {
-  currentDrive = 0;
-  targetDrive = 0;
-  currentSteer = 0;
-  targetSteer = 0;
-  analogWrite(PIN_DRIVE_PWM1, 0);
-  analogWrite(PIN_DRIVE_PWM2, 0);
-  analogWrite(PIN_STEER_PWM1, 0);
-  analogWrite(PIN_STEER_PWM2, 0);
-}
-
-// ハードウェアへの実際のPWM出力
-void applyMotors(int drive, int steer) {
-  // 走行
-  if (drive > 0) {
-    analogWrite(PIN_DRIVE_PWM1, drive);
-    analogWrite(PIN_DRIVE_PWM2, 0);
-  } else if (drive < 0) {
-    analogWrite(PIN_DRIVE_PWM1, 0);
-    analogWrite(PIN_DRIVE_PWM2, -drive);
+// 走行モーター制御 (speed: -255 〜 +255)
+void setDrive(int speed) {
+  speed = constrain(speed, -MAX_DRIVE_PWM, MAX_DRIVE_PWM);
+  if (speed > 0) {
+    ledcWrite(CH_DRIVE1, speed);
+    ledcWrite(CH_DRIVE2, 0);
+  } else if (speed < 0) {
+    ledcWrite(CH_DRIVE1, 0);
+    ledcWrite(CH_DRIVE2, -speed);
   } else {
-    analogWrite(PIN_DRIVE_PWM1, 0);
-    analogWrite(PIN_DRIVE_PWM2, 0);
+    ledcWrite(CH_DRIVE1, 0);
+    ledcWrite(CH_DRIVE2, 0);
+  }
+}
+
+// 操舵モーター制御 (steer: -255 〜 +255, 負=左, 正=右)
+void setSteer(int steer) {
+  steer = constrain(steer, -255, 255);
+  
+  // ステアリング保持時間が長すぎる場合は力を弱めて過熱防止
+  if (steer != 0) {
+    if (steerStartTime == 0) steerStartTime = millis();
+    else if (millis() - steerStartTime > MAX_STEER_HOLD_MS) {
+      steer = (steer > 0) ? 120 : -120; // 保持トルクを半分に低減
+    }
+  } else {
+    steerStartTime = 0;
   }
 
-  // 操舵
   if (steer < 0) {
-    analogWrite(PIN_STEER_PWM1, -steer);
-    analogWrite(PIN_STEER_PWM2, 0);
+    ledcWrite(CH_STEER1, -steer);
+    ledcWrite(CH_STEER2, 0);
   } else if (steer > 0) {
-    analogWrite(PIN_STEER_PWM1, 0);
-    analogWrite(PIN_STEER_PWM2, steer);
+    ledcWrite(CH_STEER1, 0);
+    ledcWrite(CH_STEER2, steer);
   } else {
-    analogWrite(PIN_STEER_PWM1, 0);
-    analogWrite(PIN_STEER_PWM2, 0);
+    ledcWrite(CH_STEER1, 0);
+    ledcWrite(CH_STEER2, 0);
   }
 }
 
 void loop() {
-  // 1. スマホからのコマンド受信
-  // フォーマット: "c,drive,steer\n" 例: "c,200,-120\n"
+  // 1. コマンド受信処理
   if (Serial.available() > 0) {
     char c = Serial.peek();
+    lastCmdTime = millis();
+
+    // フォーマット: "c,drive,steer\n" 例: "c,150,-100\n"
     if (c == 'c') {
       Serial.read(); // 'c'
       if (Serial.read() == ',') {
-        targetDrive = constrain(Serial.parseInt(), -255, 255);
-        targetSteer = constrain(Serial.parseInt(), -255, 255);
-        lastCmdTime = millis();
+        int drive = Serial.parseInt();
+        int steer = Serial.parseInt();
+        setDrive(drive);
+        setSteer(steer);
         while (Serial.available() && Serial.read() != '\n'); // flush
       }
     } else {
+      // 1文字テスト用コマンド (PCシリアルモニタ等)
       char cmd = Serial.read();
-      lastCmdTime = millis();
       switch (cmd) {
-        case 'f': targetDrive = 190; targetSteer = 0; break;
-        case 'b': targetDrive = -170; targetSteer = 0; break;
-        case 'l': targetDrive = 180; targetSteer = -210; break;
-        case 'r': targetDrive = 180; targetSteer = 210; break;
-        case 's': emergencyStop(); break;
+        case 'f': setDrive(150); setSteer(0); break;     // 前進 (安全速度)
+        case 'b': setDrive(-140); setSteer(0); break;    // 後退
+        case 'l': setDrive(140); setSteer(-230); break;  // 前進左折
+        case 'r': setDrive(140); setSteer(230); break;   // 前進右折
+        case 's': emergencyStop(); break;                // 停止
       }
     }
   }
 
-  // 2. フェイルセーフ (通信途絶時の自動停止)
+  // 2. フェイルセーフ監視 (通信途絶時は即停止)
   if (millis() - lastCmdTime > TIMEOUT_MS) {
-    targetDrive = 0;
-    targetSteer = 0;
+    emergencyStop();
   }
 
-  // 3. スムーズ加減速 (ステップごとに目標速度へ近づける)
-  const int ACCEL_STEP = 15;
-  if (currentDrive < targetDrive) currentDrive = min(currentDrive + ACCEL_STEP, targetDrive);
-  else if (currentDrive > targetDrive) currentDrive = max(currentDrive - ACCEL_STEP, targetDrive);
-
-  currentSteer = targetSteer; // ステアリングは機敏に応答
-
-  applyMotors(currentDrive, currentSteer);
-  delay(10); // 100Hzループ
+  delay(5);
 }
