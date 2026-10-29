@@ -57,7 +57,18 @@
             <div class="row">
                 <button id="btnConnect" class="btn">⚡ USB CONNECT</button>
                 <button id="btnAuto" class="btn">▶ AUTO: OFF</button>
-                <button id="btnRec" class="btn btn-rec">● REC (SNS動画)</button>
+                <button id="btnRec" class="btn btn-rec">● REC (動画+CSVログ)</button>
+            </div>
+
+            <!-- 手動走行パッド (E2E学習データ収集用) -->
+            <div id="manualControls" class="row" style="justify-content: center; gap: 12px; margin: 4px 0;">
+                <button class="btn btn-dir" id="btnLeft" style="width: 50px; justify-content: center;">◀</button>
+                <div style="display: flex; flex-direction: column; gap: 4px;">
+                    <button class="btn btn-dir" id="btnForward" style="width: 60px; justify-content: center;">▲</button>
+                    <button class="btn btn-dir" id="btnBackward" style="width: 60px; justify-content: center;">▼</button>
+                </div>
+                <button class="btn btn-dir" id="btnRight" style="width: 50px; justify-content: center;">▶</button>
+                <button class="btn" id="btnStop" style="border-color: #f43f5e; color: #f43f5e; margin-left: 8px;">STOP</button>
             </div>
 
             <div class="telemetry-grid">
@@ -109,6 +120,7 @@
         let targetFace = null;
         let emotionState = "SEARCHING";
         let gridOffset = 0;
+        let drivingLog = []; // 操舵・駆動ログ（CSVエクスポート用）
 
         // Web Audio 効果音シンセサイザー (ピピピッ、ロックオン音)
         function playBeep(freq = 1760, duration = 0.08) {
@@ -204,6 +216,16 @@
         async function sendCommand(drive, steer) {
             dispDrive.innerText = Math.round(drive) + " PWM";
             dispSteer.innerText = Math.round((steer / 255) * 45) + "°";
+            
+            // 録画中はタイムスタンプ付きでログを蓄積
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                drivingLog.push({
+                    t: Date.now() - recStartTime,
+                    drive: Math.round(drive),
+                    steer: Math.round(steer)
+                });
+            }
+
             if (!writer) return;
             const msg = `c,${Math.round(drive)},${Math.round(steer)}\n`;
             try {
@@ -211,7 +233,40 @@
             } catch(e){}
         }
 
-        // 4. 自動運転トグル
+        // 4. 手動走行ボタンのイベント登録 (タッチ・クリック)
+        function bindDirectionButton(btnId, driveVal, steerVal) {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            const startHandler = (e) => {
+                e.preventDefault();
+                sendCommand(driveVal, steerVal);
+                btn.classList.add("btn-active");
+            };
+            const stopHandler = (e) => {
+                e.preventDefault();
+                sendCommand(0, 0);
+                btn.classList.remove("btn-active");
+            };
+            btn.addEventListener('mousedown', startHandler);
+            btn.addEventListener('mouseup', stopHandler);
+            btn.addEventListener('mouseleave', stopHandler);
+            btn.addEventListener('touchstart', startHandler);
+            btn.addEventListener('touchend', stopHandler);
+        }
+
+        bindDirectionButton('btnForward', 150, 0);
+        bindDirectionButton('btnBackward', -150, 0);
+        bindDirectionButton('btnLeft', 150, -255);
+        bindDirectionButton('btnRight', 150, 255);
+
+        document.getElementById('btnStop').addEventListener('click', () => {
+            sendCommand(0, 0);
+            if (isAuto) {
+                btnAuto.click(); // オートも解除
+            }
+        });
+
+        // 5. 自動運転トグル
         btnAuto.addEventListener('click', () => {
             isAuto = !isAuto;
             if (isAuto) {
@@ -229,7 +284,7 @@
             }
         });
 
-        // 5. ワンタップ動画録画 (MediaRecorder)
+        // 6. ワンタップ動画＋CSVデータ記録 (MediaRecorder)
         btnRec.addEventListener('click', () => {
             if (!mediaRecorder || mediaRecorder.state === "inactive") {
                 startRecording();
@@ -240,10 +295,11 @@
 
         function startRecording() {
             recordedChunks = [];
+            drivingLog = []; // ログ初期化
             const stream = canvas.captureStream(30);
             mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
             mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
-            mediaRecorder.onstop = saveVideo;
+            mediaRecorder.onstop = saveVideoAndLog;
             mediaRecorder.start();
 
             btnRec.classList.add("recording");
@@ -255,29 +311,47 @@
                 recTimer.innerText = `REC ${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
             }, 1000);
             playBeep(2000, 0.1);
-            speak("Recording.");
+            speak("Recording video and telemetry.");
         }
 
         function stopRecording() {
             mediaRecorder.stop();
             clearInterval(recInterval);
             btnRec.classList.remove("recording");
-            btnRec.innerText = "● REC (SNS動画)";
+            btnRec.innerText = "● REC (動画+CSVログ)";
             recTimer.style.display = "none";
-            speak("Saving clip.");
+            speak("Saving dataset.");
         }
 
-        function saveVideo() {
-            const blob = new Blob(recordedChunks, { type: 'video/webm' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.style.display = 'none';
-            a.href = url;
-            a.download = `toyota86_ai_hud_${Date.now()}.webm`;
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
-            logStatus.innerText = "VIDEO SAVED. READY FOR X / TIKTOK";
+        function saveVideoAndLog() {
+            const timestamp = Date.now();
+            
+            // ① 動画のダウンロード
+            const videoBlob = new Blob(recordedChunks, { type: 'video/webm' });
+            const videoUrl = URL.createObjectURL(videoBlob);
+            const aVideo = document.createElement('a');
+            aVideo.style.display = 'none';
+            aVideo.href = videoUrl;
+            aVideo.download = `toyota86_drive_${timestamp}.webm`;
+            document.body.appendChild(aVideo);
+            aVideo.click();
+            setTimeout(() => { document.body.removeChild(aVideo); URL.revokeObjectURL(videoUrl); }, 100);
+
+            // ② コマンドCSVのダウンロード (timestamp_ms, drive_pwm, steer_pwm)
+            let csvContent = "timestamp_ms,drive_pwm,steer_pwm\n";
+            drivingLog.forEach(row => {
+                csvContent += `${row.t},${row.drive},${row.steer}\n`;
+            });
+            const csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const csvUrl = URL.createObjectURL(csvBlob);
+            const aCsv = document.createElement('a');
+            aCsv.style.display = 'none';
+            aCsv.href = csvUrl;
+            aCsv.download = `driving_log_${timestamp}.csv`;
+            document.body.appendChild(aCsv);
+            setTimeout(() => { aCsv.click(); document.body.removeChild(aCsv); URL.revokeObjectURL(csvUrl); }, 300);
+
+            logStatus.innerText = "DATASET SAVED (VIDEO + CSV). READY FOR COLAB";
         }
 
         // 6. メイン描画＆推論ループ (30〜60fps)
