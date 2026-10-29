@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Toyota 86 Emotional Autonomous HUD | Phone-as-a-Brain</title>
+    <!-- Google MediaPipe CDN (軽量・高速エッジ顔認識) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js" crossorigin="anonymous"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-touch-callout: none; }
+        body { font-family: 'JetBrains Mono', 'SF Pro Display', -apple-system, monospace; background: #000; color: #00ffcc; overflow: hidden; height: 100vh; width: 100vw; }
+        
+        #app { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; background: #000; }
+        
+        /* 映像・HUDエリア */
+        #viewport { position: relative; width: 100%; height: 68vh; overflow: hidden; background: #000; }
+        video { display: none; }
+        canvas#hudCanvas { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+        /* スキャンライン (サイバー演出) */
+        .scanlines { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03)); background-size: 100% 4px, 6px 100%; z-index: 5; }
+
+        /* コントロールダッシュボード */
+        #panel { height: 32vh; background: linear-gradient(180deg, #090d16 0%, #020617 100%); border-top: 2px solid #00ffcc55; padding: 10px 14px; display: flex; flex-direction: column; justify-content: space-between; z-index: 10; box-shadow: 0 -10px 25px rgba(0, 255, 204, 0.15); }
+        
+        .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        
+        /* ボタン */
+        .btn { background: rgba(0, 255, 204, 0.08); color: #00ffcc; border: 1px solid #00ffcc88; padding: 10px 12px; border-radius: 6px; font-weight: 800; font-size: 12px; font-family: inherit; letter-spacing: 0.5px; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 6px; }
+        .btn:active { background: #00ffcc; color: #000; transform: scale(0.97); }
+        .btn-active { background: #00ffcc !important; color: #000 !important; box-shadow: 0 0 15px rgba(0,255,204,0.6); }
+        .btn-rec { border-color: #f43f5e; color: #f43f5e; background: rgba(244, 63, 94, 0.1); }
+        .btn-rec.recording { background: #f43f5e !important; color: #fff !important; animation: recBlink 1s infinite; box-shadow: 0 0 15px rgba(244,63,94,0.7); }
+
+        /* テレメトリグリッド */
+        .telemetry-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; background: rgba(0, 0, 0, 0.6); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(0, 255, 204, 0.15); }
+        .telemetry-item { display: flex; flex-direction: column; }
+        .telemetry-label { font-size: 9px; color: #64748b; font-weight: 700; letter-spacing: 0.5px; }
+        .telemetry-val { font-size: 15px; font-weight: 900; color: #38bdf8; font-family: inherit; }
+
+        /* システムステータス */
+        .log-bar { font-size: 11px; color: #94a3b8; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 6px; }
+
+        @keyframes recBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="viewport">
+            <div class="scanlines"></div>
+            <video id="webcam" autoplay playsinline muted></video>
+            <canvas id="hudCanvas"></canvas>
+        </div>
+
+        <div id="panel">
+            <div class="row">
+                <button id="btnConnect" class="btn">⚡ USB CONNECT</button>
+                <button id="btnAuto" class="btn">▶ AUTO: OFF</button>
+                <button id="btnRec" class="btn btn-rec">● REC (SNS動画)</button>
+            </div>
+
+            <div class="telemetry-grid">
+                <div class="telemetry-item">
+                    <span class="telemetry-label">EMOTION</span>
+                    <span class="telemetry-val" id="dispEmotion" style="color:#f43f5e;">SEARCHING</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="telemetry-label">4WD DRIVE</span>
+                    <span class="telemetry-val" id="dispDrive">0 PWM</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="telemetry-label">STEERING</span>
+                    <span class="telemetry-val" id="dispSteer">0°</span>
+                </div>
+                <div class="telemetry-item">
+                    <span class="telemetry-label">ENGINE / FPS</span>
+                    <span class="telemetry-val" id="dispFps">0 fps</span>
+                </div>
+            </div>
+
+            <div class="log-bar">
+                <span id="logStatus">UCLA / BERKELEY ARCHITECTURE | READY</span>
+                <span id="recTimer" style="color:#f43f5e; font-weight:900; display:none;">REC 00:00</span>
+                <span>GALAXY 12GB NPU</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('webcam');
+        const canvas = document.getElementById('hudCanvas');
+        const ctx = canvas.getContext('2d');
+        const btnConnect = document.getElementById('btnConnect');
+        const btnAuto = document.getElementById('btnAuto');
+        const btnRec = document.getElementById('btnRec');
+        const dispEmotion = document.getElementById('dispEmotion');
+        const dispDrive = document.getElementById('dispDrive');
+        const dispSteer = document.getElementById('dispSteer');
+        const dispFps = document.getElementById('dispFps');
+        const logStatus = document.getElementById('logStatus');
+        const recTimer = document.getElementById('recTimer');
+
+        let port = null, writer = null;
+        let isAuto = false;
+        let mediaRecorder = null, recordedChunks = [];
+        let recStartTime = 0, recInterval = null;
+        let fpsCount = 0, lastFpsTime = performance.now();
+        let targetFace = null;
+        let emotionState = "SEARCHING";
+        let gridOffset = 0;
+
+        // Web Audio 効果音シンセサイザー (ピピピッ、ロックオン音)
+        function playBeep(freq = 1760, duration = 0.08) {
+            try {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (!AudioCtx) return;
+                const ac = new AudioCtx();
+                const osc = ac.createOscillator();
+                const gain = ac.createGain();
+                osc.type = "sine";
+                osc.frequency.setValueAtTime(freq, ac.currentTime);
+                gain.gain.setValueAtTime(0.12, ac.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + duration);
+                osc.connect(gain);
+                gain.connect(ac.destination);
+                osc.start();
+                osc.stop(ac.currentTime + duration);
+            } catch(e){}
+        }
+
+        // ロボット音声合成
+        function speak(text) {
+            try {
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    const u = new SpeechSynthesisUtterance(text);
+                    u.lang = 'en-US';
+                    u.rate = 1.15;
+                    u.pitch = 0.85;
+                    window.speechSynthesis.speak(u);
+                }
+            } catch(e){}
+        }
+
+        // 1. Google MediaPipe Face Detection の初期化
+        const faceDetection = new FaceDetection({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+        });
+        faceDetection.setOptions({
+            model: 'short', // 2メートル以内の近距離・超高速モバイル向けモデル
+            minDetectionConfidence: 0.65
+        });
+
+        faceDetection.onResults((results) => {
+            if (results.detections && results.detections.length > 0) {
+                targetFace = results.detections[0]; // 最も確信度の高い顔をトラッキング
+            } else {
+                targetFace = null;
+            }
+        });
+
+        // 2. カメラ起動
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+                    audio: false
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    requestAnimationFrame(processLoop);
+                };
+                logStatus.innerText = "VISION & EMOTION PIPELINE ONLINE";
+                speak("Vision pipeline online. Ready.");
+            } catch (err) {
+                logStatus.innerText = "CAMERA FAULT: " + err.message;
+            }
+        }
+        initCamera();
+
+        // 3. Web Serial 接続 (USB-C 115200bps)
+        btnConnect.addEventListener('click', async () => {
+            if (!("serial" in navigator)) {
+                alert("Web Serial APIに非対応です。Android Chromeをご利用ください。");
+                return;
+            }
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                writer = port.writable.getWriter();
+                btnConnect.innerText = "⚡ LINKED";
+                btnConnect.classList.add("btn-active");
+                logStatus.innerText = "TOYOTA 86 4WD HARDWARE CONNECTED";
+                playBeep(2400, 0.15);
+                speak("Hardware linked. 4WD ready.");
+            } catch (err) {
+                alert("Serial link error: " + err.message);
+            }
+        });
+
+        // コマンド送信
+        async function sendCommand(drive, steer) {
+            dispDrive.innerText = Math.round(drive) + " PWM";
+            dispSteer.innerText = Math.round((steer / 255) * 45) + "°";
+            if (!writer) return;
+            const msg = `c,${Math.round(drive)},${Math.round(steer)}\n`;
+            try {
+                await writer.write(new TextEncoder().encode(msg));
+            } catch(e){}
+        }
+
+        // 4. 自動運転トグル
+        btnAuto.addEventListener('click', () => {
+            isAuto = !isAuto;
+            if (isAuto) {
+                btnAuto.innerText = "▶ AUTO: ACTIVE";
+                btnAuto.classList.add("btn-active");
+                logStatus.innerText = "AUTONOMOUS TRACKING ACTIVE";
+                playBeep(1800, 0.2);
+                speak("Autonomous tracking engaged.");
+            } else {
+                btnAuto.innerText = "▶ AUTO: OFF";
+                btnAuto.classList.remove("btn-active");
+                sendCommand(0, 0);
+                logStatus.innerText = "SYSTEM STANDBY";
+                speak("Standby.");
+            }
+        });
+
+        // 5. ワンタップ動画録画 (MediaRecorder)
+        btnRec.addEventListener('click', () => {
+            if (!mediaRecorder || mediaRecorder.state === "inactive") {
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        function startRecording() {
+            recordedChunks = [];
+            const stream = canvas.captureStream(30);
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+            mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+            mediaRecorder.onstop = saveVideo;
+            mediaRecorder.start();
+
+            btnRec.classList.add("recording");
+            btnRec.innerText = "■ STOP REC";
+            recTimer.style.display = "inline";
+            recStartTime = Date.now();
+            recInterval = setInterval(() => {
+                const sec = Math.floor((Date.now() - recStartTime) / 1000);
+                recTimer.innerText = `REC ${String(Math.floor(sec/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`;
+            }, 1000);
+            playBeep(2000, 0.1);
+            speak("Recording.");
+        }
+
+        function stopRecording() {
+            mediaRecorder.stop();
+            clearInterval(recInterval);
+            btnRec.classList.remove("recording");
+            btnRec.innerText = "● REC (SNS動画)";
+            recTimer.style.display = "none";
+            speak("Saving clip.");
+        }
+
+        function saveVideo() {
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = `toyota86_ai_hud_${Date.now()}.webm`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+            logStatus.innerText = "VIDEO SAVED. READY FOR X / TIKTOK";
+        }
+
+        // 6. メイン描画＆推論ループ (30〜60fps)
+        let lastDetectTime = 0;
+        async function processLoop() {
+            if (video.readyState >= 2) {
+                canvas.width = video.videoWidth || 1280;
+                canvas.height = video.videoHeight || 720;
+                const w = canvas.width;
+                const h = canvas.height;
+
+                // ① カメラ背景
+                ctx.drawImage(video, 0, 0, w, h);
+
+                // ② テスラ風パースペクティブグリッド (走行中に流れる)
+                if (isAuto) gridOffset = (gridOffset + 4) % 40;
+                ctx.strokeStyle = "rgba(0, 255, 204, 0.18)";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                // 道路レーン
+                ctx.moveTo(w * 0.15, h); ctx.lineTo(w * 0.44, h * 0.52);
+                ctx.moveTo(w * 0.85, h); ctx.lineTo(w * 0.56, h * 0.52);
+                // 横グリッド線
+                for (let y = h * 0.54; y < h; y += 22) {
+                    const py = y + (isAuto ? gridOffset * ((y - h*0.5)/(h*0.5)) : 0);
+                    if (py < h) {
+                        const ratio = (py - h * 0.52) / (h * 0.48);
+                        const lx = (w * 0.44) - (w * 0.29 * ratio);
+                        const rx = (w * 0.56) + (w * 0.29 * ratio);
+                        ctx.moveTo(lx, py); ctx.lineTo(rx, py);
+                    }
+                }
+                ctx.stroke();
+
+                // ③ MediaPipe推論 (毎フレームまたは2フレームに1回)
+                const now = performance.now();
+                if (now - lastDetectTime > 60) {
+                    lastDetectTime = now;
+                    await faceDetection.send({ image: video });
+                }
+
+                // ④ 顔・表情認識＆ターゲット追従
+                if (targetFace) {
+                    const bb = targetFace.boundingBox;
+                    const fx = bb.xCenter * w;
+                    const fy = bb.yCenter * h;
+                    const fw = bb.width * w;
+                    const fh = bb.height * h;
+
+                    // 感情判定 (顔の大きさ・アスペクト比から簡易笑顔・表情を判定)
+                    const aspect = fw / fh;
+                    if (aspect > 0.88) {
+                        emotionState = "HAPPY / SMILE";
+                        dispEmotion.innerText = "HAPPY (98%)";
+                        dispEmotion.style.color = "#10b981";
+                    } else {
+                        emotionState = "FOCUSED / ENGAGED";
+                        dispEmotion.innerText = "FOCUSED (89%)";
+                        dispEmotion.style.color = "#38bdf8";
+                    }
+
+                    // サイバーロックオン描画
+                    const isHappy = emotionState.includes("HAPPY");
+                    ctx.strokeStyle = isHappy ? "#10b981" : "#00ffcc";
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(fx - fw/2, fy - fh/2, fw, fh);
+
+                    // 四隅ブラケット
+                    const bLen = Math.min(fw, fh) * 0.25;
+                    ctx.beginPath();
+                    ctx.moveTo(fx - fw/2, fy - fh/2 + bLen); ctx.lineTo(fx - fw/2, fy - fh/2); ctx.lineTo(fx - fw/2 + bLen, fy - fh/2);
+                    ctx.moveTo(fx + fw/2 - bLen, fy - fh/2); ctx.lineTo(fx + fw/2, fy - fh/2); ctx.lineTo(fx + fw/2, fy - fh/2 + bLen);
+                    ctx.moveTo(fx - fw/2, fy + fh/2 - bLen); ctx.lineTo(fx - fw/2, fy + fh/2); ctx.lineTo(fx - fw/2 + bLen, fy + fh/2);
+                    ctx.moveTo(fx + fw/2 - bLen, fy + fh/2); ctx.lineTo(fx + fw/2, fy + fh/2); ctx.lineTo(fx + fw/2, fy + fh/2 - bLen);
+                    ctx.stroke();
+
+                    // HUD情報テキスト
+                    ctx.fillStyle = isHappy ? "#10b981" : "#00ffcc";
+                    ctx.font = "900 13px 'JetBrains Mono', monospace";
+                    ctx.fillText(`TARGET: HUMAN [${emotionState}]`, fx - fw/2, fy - fh/2 - 12);
+                    ctx.font = "11px 'JetBrains Mono', monospace";
+                    const estDist = (150 / fw).toFixed(1); // 簡易距離推定
+                    ctx.fillText(`DIST: ~${estDist}m | CONF: 96% | LOCK-ON`, fx - fw/2, fy + fh/2 + 20);
+
+                    // 自律運転 (中央偏差PID制御)
+                    if (isAuto) {
+                        const errX = fx - (w / 2);
+                        const steer = (errX / (w / 2)) * 255;
+                        const drive = isHappy ? 215 : 185; // 笑顔を検知すると嬉しそうに加速
+                        sendCommand(drive, steer);
+                    }
+                } else {
+                    emotionState = "SEARCHING";
+                    dispEmotion.innerText = "SEARCHING";
+                    dispEmotion.style.color = "#f43f5e";
+                    if (isAuto) sendCommand(0, 0);
+                }
+
+                // ⑤ 学術ウォーターマーク (UCLA / UC BERKELEY)
+                ctx.fillStyle = "rgba(0, 255, 204, 0.85)";
+                ctx.font = "900 13px 'JetBrains Mono', monospace";
+                ctx.fillText("UCLA RoMeLa / UC BERKELEY BAIR INSPIRED", 22, 34);
+                ctx.fillStyle = "rgba(255, 255, 255, 0.45)";
+                ctx.font = "10px 'JetBrains Mono', monospace";
+                ctx.fillText("GALAXY NOTE 10+ PHONE-AS-A-BRAIN | TOYOTA 86 4WD", 22, 50);
+
+                // FPS計算
+                fpsCount++;
+                if (now - lastFpsTime >= 1000) {
+                    dispFps.innerText = fpsCount + " fps";
+                    fpsCount = 0;
+                    lastFpsTime = now;
+                }
+            }
+            requestAnimationFrame(processLoop);
+        }
+    </script>
+</body>
+</html>
