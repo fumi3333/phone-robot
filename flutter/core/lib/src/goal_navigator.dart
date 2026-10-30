@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'astar.dart';
 import 'explorer.dart';
+import 'keepout.dart';
 import 'occupancy_grid.dart';
 import 'params.dart';
 import 'pose.dart';
@@ -22,8 +23,8 @@ class GoToResult {
 
   /// 失敗理由（成功時は null）。
   /// 'goal-out-of-bounds' / 'goal-unknown' / 'goal-occupied' /
-  /// 'unreachable' / 'blocked-no-progress' / 'too-many-replans' /
-  /// 'step-limit'
+  /// 'goal-keepout' / 'unreachable' / 'blocked-no-progress' /
+  /// 'too-many-replans' / 'step-limit'
   final String? failureReason;
 
   /// 実際に通ったセル列（start を含む）。
@@ -56,6 +57,12 @@ class GoalNavigator {
     required Cell goal,
     required MotionHooks hooks,
     int maxSteps = 2000,
+
+    /// 立ち入り禁止エリア。指定すると禁止セルを通らない経路を引き、
+    /// ゴール自体が禁止エリア内なら 'goal-keepout' で失敗を返す。
+    /// 現在地セルだけは例外として常に通行可にする（禁止エリア内に
+    /// 立っている状態から脱出できなくなるのを防ぐ）。
+    KeepOutZones? keepOut,
     void Function(Float32List snapshot, Cell robot)? onFrame,
   }) {
     final p = params;
@@ -80,6 +87,10 @@ class GoalNavigator {
       return fail('goal-unknown');
     }
     if (!grid.isPlanFree(goalIdx)) return fail('goal-occupied');
+    if (keepOut != null && keepOut.containsIndex(goalIdx)) {
+      // 禁止エリア内の地点は、空いていても「行かない」が正しい
+      return fail('goal-keepout');
+    }
 
     var current = start;
     var noProgressPlans = 0;
@@ -87,6 +98,12 @@ class GoalNavigator {
     while (current != goal) {
       if (steps >= maxSteps) return fail('step-limit');
       final mask = grid.planMask(forcedFree: current);
+      if (keepOut != null) {
+        final curIdx = grid.index(current.r, current.c);
+        for (final i in keepOut.cells) {
+          if (i != curIdx) mask[i] = 0;
+        }
+      }
       final path = findPath(
         gridW: p.gridW,
         gridH: p.gridH,
