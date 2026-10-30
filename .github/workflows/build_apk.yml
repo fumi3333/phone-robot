@@ -1,0 +1,76 @@
+name: Build and Release Flutter APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Generate Android project scaffolding
+        working-directory: flutter/app
+        run: |
+          cp pubspec.yaml pubspec.yaml.bak
+          flutter create --org dev.fumiproject --project-name phone_robot_app --platforms=android .
+          cp pubspec.yaml.bak pubspec.yaml
+
+      - name: Install dependencies
+        working-directory: flutter/app
+        run: |
+          flutter pub get
+
+      - name: Build APK (Release)
+        working-directory: flutter/app
+        run: |
+          flutter build apk --release
+
+      - name: Prepare APK artifact
+        run: |
+          mkdir -p dist
+          cp flutter/app/build/app/outputs/flutter-apk/app-release.apk dist/phone-robot-app.apk
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0
+          name: v0.1.0 - Phone Robot Mapping App
+          body: |
+            ## Phone Robot マッピングアプリ（Android APK）
+
+            ミューズが設計したFlutter版マッピング＆巡回アプリの初回ビルドです。
+
+            ### 機能
+            - 占有格子地図（Occupancy Grid）マッピング
+            - A* 経路計画 ＆ タップで「ここに行って」ゴール指定ナビゲーション
+            - シミュレーション動作内蔵（実車・ARCore未接続でも画面上で探索・走行確認可能）
+
+            ### インストール手順
+            1. 下の **`phone-robot-app.apk`** をスマートフォン（Galaxy Note 10+等）でダウンロード
+            2. ダウンロードしたAPKをタップしてインストール（「提供元不明のアプリ」を許可）
+          files: dist/phone-robot-app.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
