@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- CH340: Lzxuan ESP32 基板 (VID 0x1A86 / PID 0x7523) -->
+    <usb-device vendor-id="6790" product-id="29987" />
+    <!-- CP210x (VID 0x10C4) -->
+    <usb-device vendor-id="4292" />
+    <!-- Espressif ネイティブ USB (VID 0x303A) -->
+    <usb-device vendor-id="12346" />
+    <!-- FTDI (VID 0x0403) -->
+    <usb-device vendor-id="1027" />
+</resources>
