@@ -26,15 +26,30 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
 
-      - name: Generate Android project scaffolding
-        working-directory: flutter/app
+      # リポジトリ内の android/ は自前実装（Kotlin の ArCoreManager / SerialManager、
+      # Manifest、build.gradle）が正であり、flutter create で上書きしない。
+      # push 経路の都合でコミットできないバイナリ（gradle-wrapper.jar と
+      # ランチャーアイコン PNG）だけが欠けている場合は、使い捨ての
+      # スキャフォールドからその2種類だけを補う。
+      - name: Restore binary scaffold assets (wrapper jar / launcher icons)
         run: |
-          cp pubspec.yaml pubspec.yaml.bak
-          flutter create --org dev.fumiproject --project-name phone_robot_app --platforms=android .
-          cp pubspec.yaml.bak pubspec.yaml
+          set -e
+          chmod +x flutter/app/android/gradlew || true
+          if [ ! -f flutter/app/android/gradle/wrapper/gradle-wrapper.jar ]; then
+            mkdir -p "$RUNNER_TEMP/scaffold"
+            (cd "$RUNNER_TEMP" && flutter create --org dev.fumiproject --project-name phone_robot_app --platforms=android scaffold)
+            cp "$RUNNER_TEMP/scaffold/android/gradle/wrapper/gradle-wrapper.jar" \
+               flutter/app/android/gradle/wrapper/gradle-wrapper.jar
+            for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+              mkdir -p "flutter/app/android/app/src/main/res/mipmap-$d"
+              cp "$RUNNER_TEMP/scaffold/android/app/src/main/res/mipmap-$d/ic_launcher.png" \
+                 "flutter/app/android/app/src/main/res/mipmap-$d/ic_launcher.png"
+            done
+          fi
 
       - name: Install dependencies
         working-directory: flutter/app
@@ -54,17 +69,20 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: v0.1.0 - Phone Robot Mapping App
+          tag_name: v0.2.0
+          name: v0.2.0 - Phone Robot App（実機モード対応）
           body: |
-            ## Phone Robot マッピングアプリ（Android APK）
+            ## Phone Robot アプリ（Android APK）v0.2.0
 
-            ミューズが設計したFlutter版マッピング＆巡回アプリの初回ビルドです。
+            Flutter版マッピング＆巡回アプリ。v0.2.0 から実機モードに対応しました。
 
             ### 機能
-            - 占有格子地図（Occupancy Grid）マッピング
+            - 占有格子地図（Occupancy Grid）マッピング＋フロンティア探索
             - A* 経路計画 ＆ タップで「ここに行って」ゴール指定ナビゲーション
-            - シミュレーション動作内蔵（実車・ARCore未接続でも画面上で探索・走行確認可能）
+            - 巡回キット（帰還・経路の保存/再生・立入禁止エリア・変化検出・巡回レポート）
+            - シミュレーションモード内蔵（実車・ARCore未接続でも画面上で探索・走行確認可能）
+            - 実機モード（新規）: ARCore による自己位置・深度（ToF）取得、USBシリアルで ESP32 と接続
+            - Note 10+ リスク修正 R1〜R4（トラッキング喪失時の停止／フェイルセーフのフェイルクローズ化／USB切断時の幻の壁の誤記録防止／画面消灯対策）
 
             ### インストール手順
             1. 下の **`phone-robot-app.apk`** をスマートフォン（Galaxy Note 10+等）でダウンロード
