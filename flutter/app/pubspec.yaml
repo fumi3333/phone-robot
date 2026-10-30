@@ -1,0 +1,17 @@
+name: phone_robot_app
+description: phone-robot マッピングアプリ（骨格）。シミュレーションモードで地図が塗り上がり、タップでゴール指定できる。
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.5.0
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  phone_robot_core:
+    path: ../core
+
+flutter:
+  uses-material-design: true

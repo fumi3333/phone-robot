@@ -1,0 +1,7 @@
+name: phone_robot_core
+description: phone-robot マッピング中核（占有格子＋フロンティア探索＋A*＋ゴール指定ナビ）。Flutter 非依存の純 Dart。
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.0.0
