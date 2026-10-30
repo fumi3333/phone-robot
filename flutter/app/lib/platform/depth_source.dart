@@ -7,7 +7,7 @@ import 'package:phone_robot_core/phone_robot_core.dart';
 /// 距離スキャンの出所（SPEC §5.2 の差し替え点）。
 ///
 /// 実機では ARCore Depth API の深度画像を入力し、次の手順で
-/// Scan.ranges（21 本）を作る:
+/// Scan.ranges（21 本）を作る（21 本化はネイティブ側 ArCoreManager が担当）:
 /// 1. 深度画像の中央の帯（車両の進路高さに相当する行）を取り、
 ///    水平方向に 21 点を等間隔サンプリングする。
 /// 2. 生深度ではなく Raw Depth（信頼度付き）を使い、信頼度の低い点は
@@ -15,17 +15,20 @@ import 'package:phone_robot_core/phone_robot_core.dart';
 /// 3. 深度画像の画角と FOV 60° の対応は機種ごとのキャリブレーション値。
 ///
 /// 白壁・暗所では深度が外れる前提で、「計測なし」を異常扱いしない。
+/// 深度が使えない環境ではネイティブ側が全レイ「計測なし」で送り続ける
+/// （フォールバック）。その場合スキャンは地図を更新しない。
 abstract class DepthSource {
   /// [currentPose] はスキャン時点の believed pose を返す関数。
+  /// スキャンの向きは「実際に深度カメラが向いている向き」でなければ
+  /// ならない（SPEC §5.3。移動方向で代用しない）。
   Stream<Scan> scans(Pose Function() currentPose);
   Future<void> stop();
 }
 
-/// プラットフォームチャネル経由の Depth API 実装（骨格のみ・未接続）。
+/// プラットフォームチャネル経由の Depth API 実装。
 ///
 /// ネイティブ側が信頼度フィルタ済みの 21 本の距離 [m] を送る契約。
 /// 負値は「計測なし」を表し、無限遠へ変換する。
-/// TODO(実機): ネイティブ側の Depth API 実装と接続する。
 class MethodChannelDepthSource implements DepthSource {
   static const EventChannel _events = EventChannel('phone_robot/depth');
 
