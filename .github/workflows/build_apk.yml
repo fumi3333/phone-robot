@@ -56,6 +56,11 @@ jobs:
         run: |
           flutter pub get
 
+      - name: Run unit tests
+        working-directory: flutter/app
+        run: |
+          flutter test
+
       - name: Build APK (Release)
         working-directory: flutter/app
         run: |
@@ -69,24 +74,23 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.2.0
-          name: v0.2.0 - Phone Robot App（実機モード対応）
+          tag_name: ${{ github.ref_name == 'main' && 'v0.3.0' || github.ref_name }}
+          name: ${{ github.ref_name == 'main' && 'v0.3.0' || github.ref_name }} - Phone Robot App（実機マップ＋ドライブ記録対応）
           body: |
-            ## Phone Robot アプリ（Android APK）v0.2.0
+            ## Phone Robot アプリ（Android APK）
 
-            Flutter版マッピング＆巡回アプリ。v0.2.0 から実機モードに対応しました。
+            Flutter＋Kotlin 版ワンフロア・マッピングアプリです。
 
             ### 機能
-            - 占有格子地図（Occupancy Grid）マッピング＋フロンティア探索
-            - A* 経路計画 ＆ タップで「ここに行って」ゴール指定ナビゲーション
-            - 巡回キット（帰還・経路の保存/再生・立入禁止エリア・変化検出・巡回レポート）
-            - シミュレーションモード内蔵（実車・ARCore未接続でも画面上で探索・走行確認可能）
-            - 実機モード（新規）: ARCore による自己位置・深度（ToF）取得、USBシリアルで ESP32 と接続
-            - Note 10+ リスク修正 R1〜R4（トラッキング喪失時の停止／フェイルセーフのフェイルクローズ化／USB切断時の幻の壁の誤記録防止／画面消灯対策）
+            - 占有格子地図（Occupancy Grid）マッピング＋VFH フロンティア巡回・A* 経路計画
+            - 実機モード: ARCore 自己位置・21本 ToF 深度スキャン・USB シリアル ESP32 制御（PWM 0..255）
+            - 速度スライダー（10%〜100%）・操舵反転トグル・横画面 2 ペイン対応
+            - 走行記録の自動保存（CSV / マップ PNG / JSON / サマリ MD）と Google ドライブ共有・Webhook 自動転送
+            - Note 10+ リスク修正 R1〜R4 とシミュレーションモード内蔵
 
             ### インストール手順
-            1. 下の **`phone-robot-app.apk`** をスマートフォン（Galaxy Note 10+等）でダウンロード
-            2. ダウンロードしたAPKをタップしてインストール（「提供元不明のアプリ」を許可）
+            1. 下の **`phone-robot-app.apk`** をスマートフォン（Galaxy Note 10+ 等）でダウンロード
+            2. ダウンロードした APK をタップしてインストール（「提供元不明のアプリ」を許可）
           files: dist/phone-robot-app.apk
           draft: false
           prerelease: false

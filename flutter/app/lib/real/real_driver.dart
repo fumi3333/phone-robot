@@ -123,12 +123,23 @@ class RealDriver {
   /// ウェイポイント1つあたりの走行タイムアウト。
   Duration waypointTimeout = const Duration(seconds: 30);
 
-  /// sensorLost で止まった理由（'tracking-lost' / 'scan-stale'）。
+  /// sensorLost で止まった理由（'tracking-lost' / 'scan-stale' / 'link-lost'）。
   String? lastStopReason;
+
+  /// HUD 表示用: 現在の目標進行方位 [rad] と前方自由距離 [m]。
+  double? hudTargetHeading;
+  double? hudTargetDistM;
+
+  /// rotateTo で前方接近時に切り返し（K-turn）を行うか。
+  bool enableKTurn = true;
+
+  /// ステアリング出力の左右極性を反転するか（実車モーター配線合わせ用）。
+  bool invertSteer = false;
 
   bool _aborted = false;
   bool _busy = false;
   int _appliedSeq = 0;
+  int _steerPulseTick = 0;
   double _lastScanX = 0;
   double _lastScanY = 0;
   double _lastScanHeading = 0;
@@ -324,15 +335,36 @@ class RealDriver {
   }
 
   // ------------------------------------------------------------------
-  // 基本動作（回転 / ウェイポイント走行）
+  // 基本動作（回転 / ウェイポイント走行 / パルス当て舵）
   // ------------------------------------------------------------------
 
   /// 送信結果をそのまま返す（R3: 送信失敗をドライバが見られるように）。
+  /// 駆動はギアボックスの静止摩擦デッドゾーン補正済みの [driveOf] を使う。
   Future<bool> _sendNorm(double drive, double steer) {
+    final s = invertSteer ? -steer : steer;
     return link.sendDriveSteer(
-      SerialCommandScale.of(drive),
-      SerialCommandScale.of(steer),
+      SerialCommandScale.driveOf(drive),
+      SerialCommandScale.of(s),
     );
+  }
+
+  /// Jozen 86 のバンバン操舵＋スリップクラッチ向け「パルス当て舵」計算。
+  /// - |err| < 0.09 rad (約5°): 不感帯で直進維持 (0.0)
+  /// - 0.09 <= |err| < 0.38 rad: 100ms 周期で ON/OFF を交互に出力
+  /// - |err| >= 0.38 rad: 連続フルステア (±1.0)
+  double _computePulseSteer(double err) {
+    final absErr = err.abs();
+    if (absErr < 0.09) {
+      _steerPulseTick = 0;
+      return 0.0;
+    }
+    final dir = err > 0 ? 1.0 : -1.0;
+    if (absErr >= 0.38) {
+      return dir;
+    }
+    final pulseOn = (_steerPulseTick % 2) == 0;
+    _steerPulseTick++;
+    return pulseOn ? dir : 0.0;
   }
 
   /// ゲートの結果を回転動作の可否に読み替える。
@@ -340,14 +372,15 @@ class RealDriver {
   bool _gateBlocks(DriveOutcome? g) =>
       g != null && g != DriveOutcome.replan;
 
-  /// その場向き変え。車両はステアリング式のため、低速で転がしながら
-  /// ARCore の向きが目標に近づくまで操舵する（SPEC §7 の読み替え）。
-  /// センサー喪失中は回転しない（ゲートで停止し、復帰を待つ）。
+  /// その場向き変え。車両はステアリング式のため、転がしながら ARCore の
+  /// 向きが目標に近づくまで操舵する（SPEC §7 の読み替え）。
+  /// 前方が詰まった場合は [enableKTurn] 有効時に最大2回まで切り返しを行う。
   Future<bool> rotateTo(
     double targetHeading, {
     Duration timeout = const Duration(seconds: 12),
   }) async {
     final sw = Stopwatch()..start();
+    var kTurns = 0;
     while (!_aborted && sw.elapsed < timeout) {
       if (_checkLink() != null) {
         await link.sendJog('s');
@@ -366,13 +399,35 @@ class RealDriver {
         await link.sendJog('s');
         return true;
       }
-      if (_proximityBlocked && err.abs() > 0.5) {
-        // 前方が近い状態での大きな転回は避ける
-        await link.sendJog('s');
-        return false;
-      }
       final steer = err > 0 ? 1.0 : -1.0;
-      if (!await _sendNorm(0.32, steer)) {
+      if (_proximityBlocked && err.abs() > 0.3) {
+        if (!enableKTurn || kTurns >= 2) {
+          await link.sendJog('s');
+          return false;
+        }
+        kTurns++;
+        _status('前方接近のため切り返し（K-turn $kTurns/2）…');
+        // 急反転による USB 電圧降下防止のため一瞬停止を挟み、逆ステアで後退
+        await link.sendJog('s');
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        for (var step = 0; step < 3 && !_aborted; step++) {
+          if (_checkLink() != null) {
+            await link.sendJog('s');
+            return false;
+          }
+          if (!await _sendNorm(-math.min(cruiseDrive, 0.55), -steer)) {
+            lastStopReason = 'link-lost';
+            _status('指令の送信に失敗しました（リンク切断の疑い）。停止します');
+            await link.sendJog('s');
+            return false;
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        }
+        await link.sendJog('s');
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        continue;
+      }
+      if (!await _sendNorm(math.min(cruiseDrive, 0.35), steer)) {
         lastStopReason = 'link-lost';
         _status('指令の送信に失敗しました（リンク切断の疑い）。停止します');
         await link.sendJog('s');
@@ -456,10 +511,11 @@ class RealDriver {
       }
       final desired = math.atan2(dy, dx);
       final err = _normAngle(desired - p.heading);
-      final steer = (err / 0.8).clamp(-1.0, 1.0);
-      var drive = dist < 0.18 ? 0.38 : cruiseDrive;
-      if (err.abs() > 1.2) drive = 0.30; // 大きく外れたら低速で転回優先
-      drive *= (1.0 - 0.55 * steer.abs());
+      hudTargetHeading = desired;
+      hudTargetDistM = dist;
+      final steer = _computePulseSteer(err);
+      var drive = dist < 0.18 ? math.min(cruiseDrive, 0.40) : cruiseDrive;
+      if (err.abs() >= 0.38) drive = math.min(drive, 0.45);
       if (!await _sendNorm(drive, steer)) {
         // 送信失敗 = リンクが死んでいる（R3）。障害物として扱わない。
         lastStopReason = 'link-lost';
@@ -485,6 +541,7 @@ class RealDriver {
   Future<ExploreResult> explore({
     void Function(Float32List snapshot, Cell robot)? onFrame,
     Duration maxDuration = const Duration(minutes: 8),
+    bool initialSpin = false,
   }) async {
     if (_busy) throw StateError('既に動作中です');
     _busy = true;
@@ -503,8 +560,10 @@ class RealDriver {
       grid.logOdds[grid.index(start.r, start.c)] = p.lFree;
       await captureScan();
       scans++;
-      await rotationScan();
-      scans += 12;
+      if (initialSpin) {
+        await rotationScan();
+        scans += 12;
+      }
 
       var cov = grid.coverage;
       var endReason = 'step-limit';
@@ -546,8 +605,14 @@ class RealDriver {
             endReason = 'no-progress';
             break;
           }
-          await rotationScan();
-          scans += 12;
+          if (initialSpin) {
+            await rotationScan();
+            scans += 12;
+          } else {
+            await rotateTo(heading + math.pi / 3);
+            await captureScan();
+            scans++;
+          }
           if (grid.coverage <= cov) {
             endReason = 'no-progress';
             break;
@@ -613,8 +678,13 @@ class RealDriver {
           break;
         }
         if (!blockedPath) {
-          await rotationScan();
-          scans += 12;
+          if (initialSpin) {
+            await rotationScan();
+            scans += 12;
+          } else {
+            await captureScan();
+            scans++;
+          }
         }
         cov = grid.coverage;
       }
@@ -631,6 +701,8 @@ class RealDriver {
         endReason: endReason,
       );
     } finally {
+      hudTargetHeading = null;
+      hudTargetDistM = null;
       await link.sendJog('s');
       _busy = false;
     }
@@ -754,6 +826,247 @@ class RealDriver {
         traversed: traversed,
       );
     } finally {
+      hudTargetHeading = null;
+      hudTargetDistM = null;
+      await link.sendJog('s');
+      _busy = false;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // VFH フロアマップ作成（21 本深度レイ＋フロンティア誘導）
+  // ------------------------------------------------------------------
+
+  /// 深度スキャン（21 本）の隣接 3 本移動平均に加え、未探索領域（logOdds == 0）
+  /// 利得と最寄りフロンティア方位をスコア化して進路を選出し、パルス当て舵で
+  /// 走行しながら占有格子地図を完成させる。
+  /// 前方中央コーンが 0.32 m 未満に詰まった場合は自動切り返しで回避する。
+  Future<void> cruiseVfh({
+    void Function(Float32List snapshot, Cell robot)? onFrame,
+    Duration maxDuration = const Duration(minutes: 10),
+  }) async {
+    if (_busy) throw StateError('既に動作中です');
+    _busy = true;
+    _aborted = false;
+    lastStopReason = null;
+    final p = params;
+    final offsets = rayOffsets(p);
+    final sw = Stopwatch()..start();
+    var ticks = 0;
+    double? frontierBearing;
+
+    try {
+      _status('フロアマップ作成（VFH）を開始…');
+      final start = currentCell;
+      grid.logOdds[grid.index(start.r, start.c)] = p.lFree;
+      await captureScan();
+      onFrame?.call(Float32List.fromList(grid.logOdds), currentCell);
+
+      while (!_aborted &&
+          sw.elapsed < maxDuration &&
+          grid.coverage < p.targetCoverage) {
+        if (_checkLink() != null) break;
+        if (_gateBlocks(await _gatePose())) break;
+        if (_gateBlocks(await _gateScan())) break;
+
+        final pose = _pose;
+        final scan = feed.latest;
+        if (scan == null || scan.ranges.isEmpty) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          continue;
+        }
+        final nRays = math.min(offsets.length, scan.ranges.length);
+
+        double rayDist(int idx) {
+          final r = scan.ranges[idx];
+          if (!r.isFinite || r <= 0) return 2.2;
+          return r.clamp(0.05, p.maxRange);
+        }
+
+        // 前方中央コーン（通常 7..13, -9°..+9°）の最小実測距離
+        final cStart = (nRays * 0.33).floor();
+        final cEnd = (nRays * 0.67).ceil().clamp(cStart, nRays - 1);
+        double? centerMin;
+        for (var i = cStart; i <= cEnd; i++) {
+          final r = scan.ranges[i];
+          if (r.isFinite && r > 0) {
+            centerMin = centerMin == null ? r : math.min(centerMin, r);
+          }
+        }
+
+        final frontBlocked =
+            _proximityBlocked || (centerMin != null && centerMin < 0.32);
+
+        if (frontBlocked) {
+          // 左右それぞれの自由空間を比較し、広い側へ鼻先が向くよう逆舵バック
+          final wing = math.max(1, nRays ~/ 3);
+          var rightSum = 0.0;
+          for (var i = 0; i < wing; i++) {
+            rightSum += rayDist(i);
+          }
+          var leftSum = 0.0;
+          for (var i = nRays - wing; i < nRays; i++) {
+            leftSum += rayDist(i);
+          }
+          final rightAvg = rightSum / wing;
+          final leftAvg = leftSum / wing;
+          // 左へ回頭したい場合は後退中に右ステア (-1.0) を切る
+          final reverseSteer = leftAvg >= rightAvg ? -1.0 : 1.0;
+
+          hudTargetHeading = null;
+          hudTargetDistM = centerMin ?? proximityStopM;
+          _status(
+            '前方接近（${(centerMin ?? proximityStopM).toStringAsFixed(2)} m）: '
+            '自動切り返しバック中',
+          );
+          await link.sendJog('s');
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          var sentOk = true;
+          for (var step = 0; step < 4 && !_aborted; step++) {
+            if (_checkLink() != null) {
+              sentOk = false;
+              break;
+            }
+            if (!await _sendNorm(-math.min(cruiseDrive, 0.55), reverseSteer)) {
+              lastStopReason = 'link-lost';
+              _status('指令の送信に失敗しました（リンク切断の疑い）。停止します');
+              sentOk = false;
+              break;
+            }
+            await Future<void>.delayed(const Duration(milliseconds: 100));
+          }
+          await link.sendJog('s');
+          if (!sentOk || _aborted) break;
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+          applyScanIfMoved();
+          onFrame?.call(Float32List.fromList(grid.logOdds), currentCell);
+          continue;
+        }
+
+        // 1 秒ごとに 0.4 m 以上先の最寄りフロンティア方位を更新（既知エリアの往復回避）
+        if (ticks % 10 == 0) {
+          final robot = currentCell;
+          final mask = grid.planMask(forcedFree: robot);
+          final fronts = grid.frontierCells(mask);
+          Cell? nearest;
+          var bestDistSq = double.infinity;
+          for (final f in fronts) {
+            final fc = cellCenter(p, f);
+            final dx = fc.x - pose.x;
+            final dy = fc.y - pose.y;
+            final d2 = dx * dx + dy * dy;
+            if (d2 >= 0.16 && d2 < bestDistSq) {
+              bestDistSq = d2;
+              nearest = f;
+            }
+          }
+          if (nearest != null) {
+            final fc = cellCenter(p, nearest);
+            frontierBearing = math.atan2(fc.y - pose.y, fc.x - pose.x);
+          } else {
+            frontierBearing = null;
+          }
+        }
+
+        // 隣接 3 本移動平均＋未探索セル利得＋フロンティア誘導で進路を選ぶ
+        var bestIdx = nRays ~/ 2;
+        var bestScore = -1.0;
+        final halfFov = p.fovRad / 2.0;
+        for (var i = 0; i < nRays; i++) {
+          var sum = 0.0;
+          var count = 0;
+          var minWin = double.infinity;
+          for (var j = math.max(0, i - 1);
+              j <= math.min(nRays - 1, i + 1);
+              j++) {
+            final d = rayDist(j);
+            sum += d;
+            if (d < minWin) minWin = d;
+            count++;
+          }
+          final avg = sum / count;
+          final angleWeight = 1.0 - 0.12 * (offsets[i].abs() / halfFov);
+          final measuredBonus =
+              (scan.ranges[i].isFinite && scan.ranges[i] > 0) ? 0.30 : 0.0;
+
+          final double score;
+          if (minWin < 0.32) {
+            score = minWin * 0.3;
+          } else {
+            final ang = scan.pose.heading + offsets[i];
+            final ca = math.cos(ang);
+            final sa = math.sin(ang);
+            final probeEnd = math.min(avg, 3.0);
+            var probeTotal = 0;
+            var probeUnknown = 0;
+            for (var d = 0.4; d <= probeEnd + 1e-6; d += 0.4) {
+              final c = cellOf(p, scan.pose.x + ca * d, scan.pose.y + sa * d);
+              if (!grid.inBounds(c.r, c.c)) break;
+              probeTotal++;
+              if (grid.logOdds[grid.index(c.r, c.c)] == 0) {
+                probeUnknown++;
+              }
+            }
+            final unknownRatio =
+                probeTotal > 0 ? probeUnknown / probeTotal : 0.0;
+            final frontierBonus = frontierBearing == null
+                ? 0.0
+                : 0.4 *
+                    math.max(
+                      0.0,
+                      1.0 - _normAngle(frontierBearing - ang).abs() / p.fovRad,
+                    );
+            score = avg * angleWeight +
+                measuredBonus +
+                0.6 * unknownRatio +
+                frontierBonus;
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+        }
+
+        final targetHeading = _normAngle(scan.pose.heading + offsets[bestIdx]);
+        final targetDist = rayDist(bestIdx);
+        hudTargetHeading = targetHeading;
+        hudTargetDistM = targetDist;
+
+        final err = _normAngle(targetHeading - pose.heading);
+        final steer = _computePulseSteer(err);
+        final frontClear = centerMin ?? targetDist;
+        var drive =
+            frontClear < 0.65 ? math.min(cruiseDrive, 0.40) : cruiseDrive;
+        if (err.abs() >= 0.38) drive = math.min(drive, 0.45);
+
+        if (!await _sendNorm(drive, steer)) {
+          lastStopReason = 'link-lost';
+          _status('指令の送信に失敗しました（リンク切断の疑い）。停止します');
+          break;
+        }
+
+        applyScanIfMoved();
+        ticks++;
+        if (ticks % 5 == 0) {
+          final deg = (offsets[bestIdx] * 180 / math.pi).toStringAsFixed(0);
+          _status(
+            'フロアマップ作成中（VFH）: 進路 ${deg}° / 前方 ${frontClear.toStringAsFixed(2)} m / '
+            '${(grid.coverage * 100).toStringAsFixed(1)}%',
+          );
+          onFrame?.call(Float32List.fromList(grid.logOdds), currentCell);
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (_aborted) {
+        _status('フロアマップ作成を停止しました');
+      } else if (lastStopReason == null && grid.coverage >= p.targetCoverage) {
+        _status(
+          'フロアマップ作成完了（カバー率 ${(grid.coverage * 100).toStringAsFixed(1)}%）',
+        );
+      }
+    } finally {
+      hudTargetHeading = null;
+      hudTargetDistM = null;
       await link.sendJog('s');
       _busy = false;
     }

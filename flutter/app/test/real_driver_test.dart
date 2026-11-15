@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +12,9 @@ class FakeLink implements Esp32Link {
   Esp32LinkState _state = Esp32LinkState.connected;
   final List<String> sent = [];
   bool sendOk = true;
+
+  @override
+  void Function(int drive, int steer)? onCommandSent;
 
   @override
   Esp32LinkState get state => _state;
@@ -46,10 +50,20 @@ class FakeLink implements Esp32Link {
   }
 
   @override
-  Future<bool> sendDriveSteer(int drive, int steer) => send('c,$drive,$steer\n');
+  Future<bool> sendDriveSteer(int drive, int steer) async {
+    final ok = await send('c,$drive,$steer\n');
+    onCommandSent?.call(drive, steer);
+    return ok;
+  }
 
   @override
-  Future<bool> sendJog(String ch) => send(ch);
+  Future<bool> sendJog(String ch) async {
+    final ok = await send(ch);
+    if (ch == 's') {
+      onCommandSent?.call(0, 0);
+    }
+    return ok;
+  }
 
   int get driveCommandCount => sent.where((s) => s.startsWith('c,')).length;
 }
@@ -290,5 +304,153 @@ void main() {
 
     expect(ok, isFalse);
     expect(link.driveCommandCount, 0);
+  });
+
+  test('PWM スケール: maxValue=255 かつ driveOf はデッドゾーン 140..255 に写像する', () {
+    expect(SerialCommandScale.maxValue, 255);
+    expect(SerialCommandScale.of(1.0), 255);
+    expect(SerialCommandScale.of(-1.0), -255);
+    expect(SerialCommandScale.driveOf(0.0), 0);
+    expect(SerialCommandScale.driveOf(0.01), greaterThanOrEqualTo(140));
+    expect(SerialCommandScale.driveOf(-0.01), lessThanOrEqualTo(-140));
+    expect(SerialCommandScale.driveOf(1.0), 255);
+    expect(SerialCommandScale.driveOf(-1.0), -255);
+  });
+
+  test('パルス当て舵: 中誤差では 255 と 0 が交互に出力され drive は 140 以上を保つ',
+      () async {
+    final link = FakeLink();
+    final poseFeed = PoseFeed()..setTrackingState('TRACKING');
+    final feed = ScanFeed();
+    final grid = OccupancyGrid(params);
+    final driver = makeDriver(
+      link: link,
+      poseFeed: poseFeed,
+      feed: feed,
+      grid: grid,
+    );
+    // ターゲットは (1.525, 1.025)。(1.0, 1.0) からはほぼ方位 0 rad。
+    // ロボット向きを -0.20 rad にして誤差 +0.20 rad（中誤差帯 0.09..0.38）を作る。
+    final pump = StreamPump(poseFeed, feed, Pose(1.0, 1.0, -0.20))..start();
+    try {
+      final future = driver.driveToWaypoint(target);
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      pump.pose = Pose(1.5, 1.0, 0);
+      final outcome = await future;
+      expect(outcome, DriveOutcome.arrived);
+
+      final cmds = link.sent.where((s) => s.startsWith('c,')).toList();
+      expect(cmds.length, greaterThanOrEqualTo(2));
+      final steers = cmds.map((c) => int.parse(c.split(',')[2].trim())).toList();
+      final drives = cmds.map((c) => int.parse(c.split(',')[1].trim())).toList();
+      expect(steers, contains(255));
+      expect(steers, contains(0));
+      expect(drives.every((d) => d >= SerialCommandScale.minEffectiveDrivePwm),
+          isTrue);
+    } finally {
+      pump.stop();
+    }
+  });
+
+  test('K-turn: rotateTo で前方接近時は逆ステア後退で切り返しを試みる', () async {
+    final link = FakeLink();
+    final poseFeed = PoseFeed()..setTrackingState('TRACKING');
+    final feed = ScanFeed();
+    final grid = OccupancyGrid(params);
+    final driver = makeDriver(
+      link: link,
+      poseFeed: poseFeed,
+      feed: feed,
+      grid: grid,
+    );
+    final nearRanges = Float32List.fromList(List.filled(21, 0.15));
+    Timer? t;
+    t = Timer.periodic(const Duration(milliseconds: 40), (_) {
+      poseFeed.addPose(Pose(1.0, 1.0, 0));
+      feed.add(Scan(Pose(1.0, 1.0, 0), nearRanges));
+    });
+    try {
+      final ok = await driver.rotateTo(
+        1.0,
+        timeout: const Duration(milliseconds: 900),
+      );
+      expect(ok, isFalse);
+      final cmds = link.sent.where((s) => s.startsWith('c,')).toList();
+      expect(cmds, isNotEmpty);
+      // 目標が正方向 (+1.0 rad) なのに前方が塞がれているので、
+      // 逆ステア (-255) ＋ 後退 (drive <= -140) が出力されるはず。
+      final hasReverseKTurn = cmds.any((c) {
+        final parts = c.trim().split(',');
+        final drv = int.parse(parts[1]);
+        final str = int.parse(parts[2]);
+        return drv <= -SerialCommandScale.minEffectiveDrivePwm && str == -255;
+      });
+      expect(hasReverseKTurn, isTrue);
+    } finally {
+      t.cancel();
+    }
+  });
+
+  test('cruiseVfh: 開けた左廊下へ操舵し、前方接近で逆ステア後退回避する', () async {
+    final link = FakeLink();
+    final poseFeed = PoseFeed()..setTrackingState('TRACKING');
+    final feed = ScanFeed();
+    final grid = OccupancyGrid(params);
+    final driver = makeDriver(
+      link: link,
+      poseFeed: poseFeed,
+      feed: feed,
+      grid: grid,
+    );
+
+    // 右側 (i=0..6) は近い 0.45m、左側 (i=14..20, +12°..+30°) は 3.0m 開けている
+    var ranges = Float32List.fromList(List.generate(21, (i) {
+      if (i >= 14) return 3.0;
+      if (i >= 7) return 0.9;
+      return 0.45;
+    }));
+
+    final t = Timer.periodic(const Duration(milliseconds: 40), (_) {
+      final p = Pose(3.0, 2.5, math.pi / 2);
+      poseFeed.addPose(p);
+      feed.add(Scan(p, ranges));
+    });
+
+    try {
+      final cruiseFuture = driver.cruiseVfh(
+        maxDuration: const Duration(seconds: 5),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+
+      expect(driver.hudTargetHeading, isNotNull);
+      final forwardCmds = link.sent.where((s) => s.startsWith('c,')).toList();
+      expect(forwardCmds, isNotEmpty);
+      final hasLeftTurn = forwardCmds.any((c) {
+        final parts = c.trim().split(',');
+        return int.parse(parts[1]) >= SerialCommandScale.minEffectiveDrivePwm &&
+            int.parse(parts[2]) > 0;
+      });
+      expect(hasLeftTurn, isTrue);
+
+      // 今度は前方中央が 0.25m に詰まる（左は開いている）
+      ranges = Float32List.fromList(List.generate(21, (i) {
+        if (i >= 14) return 2.5;
+        if (i >= 7) return 0.25;
+        return 0.4;
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 550));
+      await driver.stop();
+      await cruiseFuture;
+
+      final allCmds = link.sent.where((s) => s.startsWith('c,')).toList();
+      final hasAvoidReverse = allCmds.any((c) {
+        final parts = c.trim().split(',');
+        return int.parse(parts[1]) <= -SerialCommandScale.minEffectiveDrivePwm &&
+            int.parse(parts[2]) == -255;
+      });
+      expect(hasAvoidReverse, isTrue);
+    } finally {
+      t.cancel();
+    }
   });
 }

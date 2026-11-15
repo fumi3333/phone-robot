@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'platform/serial_link.dart';
 import 'real_page.dart';
 import 'sim_page.dart';
 
@@ -23,7 +26,14 @@ class PhoneRobotApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'phone-robot mapping',
-      theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF111827),
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: Colors.white,
+        useMaterial3: true,
+      ),
       home: const HomePage(),
     );
   }
@@ -40,6 +50,23 @@ class _HomePageState extends State<HomePage> {
   AppMode _mode = AppMode.simulation;
 
   @override
+  void initState() {
+    super.initState();
+    unawaited(_detectUsbAndSwitchMode());
+  }
+
+  Future<void> _detectUsbAndSwitchMode() async {
+    try {
+      final devices = await MethodChannelEsp32Link().listDevices();
+      if (devices.isNotEmpty && mounted) {
+        setState(() => _mode = AppMode.realDevice);
+      }
+    } catch (_) {
+      // デスクトップ・テスト等チャネル未実装時はシミュレーションのまま
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Column(
@@ -47,17 +74,16 @@ class _HomePageState extends State<HomePage> {
           SafeArea(
             bottom: false,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
               child: SegmentedButton<AppMode>(
+                showSelectedIcon: false,
                 segments: const [
                   ButtonSegment(
                     value: AppMode.simulation,
-                    icon: Icon(Icons.science),
                     label: Text('シミュレーション'),
                   ),
                   ButtonSegment(
                     value: AppMode.realDevice,
-                    icon: Icon(Icons.directions_car),
                     label: Text('実機'),
                   ),
                 ],

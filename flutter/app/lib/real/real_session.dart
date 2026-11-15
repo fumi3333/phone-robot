@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:phone_robot_core/phone_robot_core.dart';
 
 import '../platform/depth_source.dart';
 import '../platform/keep_awake.dart';
 import '../platform/pose_source.dart';
+import '../platform/run_storage.dart';
 import '../platform/serial_link.dart';
 import 'real_driver.dart';
 
@@ -23,18 +25,29 @@ import 'real_driver.dart';
 ///   復帰しても走行は自動再開せず、次に走行を開始するときに現在位置
 ///   から再計画する（[handleAppResumed]）。
 class RealSession {
-  static const MappingParams params = MappingParams();
+  /// 標準の部屋スケール（6.0 m × 5.0 m、セル 5 cm）。
+  static const MappingParams roomParams = MappingParams();
+
+  /// 大学ワンフロア・廊下スケール（24.0 m × 24.0 m、セル 10 cm）。
+  static const MappingParams floorParams = MappingParams(
+    cellSize: 0.10,
+    gridW: 240,
+    gridH: 240,
+    targetCoverage: 0.80,
+  );
 
   /// ストリーム無音とみなすまでの時間。ドライバ側のゲート
   /// （ポーズ 500 ms / スキャン 600 ms）より長く、こちらは
   /// 「セッションが死んだ」判定と復帰導線のための閾値。
   static const Duration stallThreshold = Duration(seconds: 3);
 
-  final OccupancyGrid grid = OccupancyGrid(params);
+  final MappingParams params;
+  late final OccupancyGrid grid = OccupancyGrid(params);
   final MethodChannelPoseSource poseSource = MethodChannelPoseSource();
-  final MethodChannelDepthSource depthSource =
-      const MethodChannelDepthSource();
+  late final MethodChannelDepthSource depthSource =
+      MethodChannelDepthSource(params: params);
   final MethodChannelEsp32Link link = MethodChannelEsp32Link();
+  final RunStorage storage;
   final ScanFeed feed = ScanFeed();
   final PoseFeed poseFeed = PoseFeed();
 
@@ -59,6 +72,16 @@ class RealSession {
   /// ポーズの配信が止まり「セッションが死んだ」判定になったか。
   bool sensorsStalled = false;
 
+  RunRecorder? _recorder;
+  bool get isRecording => _recorder != null;
+  int get recordedRowCount => _recorder?.rowCount ?? 0;
+
+  /// 記録終了時に Google ドライブへ自動送信／共有画面を開くか。
+  bool autoDriveSync = true;
+  String driveWebhookUrl = '';
+  String? lastSavedRunId;
+  String lastSaveStatus = '未保存';
+
   DateTime? _sensorsStartedAt;
   Timer? _watchdog;
 
@@ -68,16 +91,60 @@ class RealSession {
   final List<StreamSubscription<dynamic>> _subs = [];
   Timer? _notifyTimer;
 
-  RealSession() {
+  RealSession({MappingParams? customParams, RunStorage? customStorage})
+      : params = customParams ?? roomParams,
+        storage = customStorage ?? MethodChannelRunStorage() {
     driver.onStatus = (s) {
       status = s;
       _notify();
+    };
+    link.onCommandSent = (drive, steer) {
+      _recorder?.recordCommand(
+        drive,
+        steer,
+        pose: latestPose,
+        trackingState: trackingState,
+        latestScan: latestScan,
+      );
     };
   }
 
   Pose? get latestPose => poseFeed.latest;
 
+  Scan? get latestScan => feed.latest;
+
+  double? get hudTargetHeading => driver.hudTargetHeading;
+
+  double? get hudTargetDistM => driver.hudTargetDistM;
+
+  /// これまでに観測・記録したマッピング済み面積 [m²]。
+  double get mappedAreaM2 => grid.knownCount * params.cellSize * params.cellSize;
+
+  /// 現在の走行速度（正規化値 0.10..1.0）と、実車へ送る PWM 値（152..255）。
+  double get speedNorm => driver.cruiseDrive;
+  int get currentDrivePwm => SerialCommandScale.driveOf(driver.cruiseDrive);
+
+  void setSpeedNorm(double value) {
+    driver.cruiseDrive = value.clamp(0.10, 1.0);
+    _notify();
+  }
+
+  /// ステアリング出力の左右極性反転設定。
+  bool get invertSteer => driver.invertSteer;
+
+  void setInvertSteer(bool value) {
+    driver.invertSteer = value;
+    _notify();
+  }
+
   String get trackingState => poseFeed.trackingState;
+
+  /// ARCore の相対座標（開始位置 (0, 0)）をグリッド中央基準の座標へ変換する。
+  Pose toGridPose(Pose raw) => Pose(
+        raw.x + params.roomW / 2.0,
+        raw.y + params.roomH / 2.0,
+        raw.heading,
+      );
 
   void _notify() {
     // 高頻度のポーズ更新での再描画を間引く
@@ -105,16 +172,16 @@ class RealSession {
     sensorsStalled = false;
     sensorHealth = '正常';
     _subs.add(poseSource.poses.listen((pose) {
-      poseFeed.addPose(pose);
+      poseFeed.addPose(toGridPose(pose));
       _notify();
     }));
     _subs.add(poseSource.trackingStates.listen((s) {
       poseFeed.setTrackingState(s);
       _notify();
     }));
-    _subs.add(depthSource.scans(() => latestPose ?? Pose(0, 0, 0)).listen((s) {
-      feed.add(s);
-    }));
+    _subs.add(depthSource
+        .scans(() => latestPose ?? toGridPose(Pose(0, 0, math.pi / 2)))
+        .listen(_onIncomingScan));
     _subs.add(link.states.listen((s) {
       linkState = s;
       _notify();
@@ -221,6 +288,114 @@ class RealSession {
     return ok;
   }
 
+  void _onIncomingScan(Scan scan) {
+    feed.add(scan);
+    if (_recorder != null) {
+      if (!driver.isBusy) {
+        grid.applyScan(scan);
+      }
+      _recorder!.recordScan(scan, trackingState: trackingState);
+    }
+  }
+
+  /// テスト用: プラットフォームチャネルを経由せずに深度スキャンを投入する。
+  void recordScanForTest(Scan scan) => _onIncomingScan(scan);
+
+  void startRecording({String mode = 'manual'}) {
+    _recorder = RunRecorder(mode: mode);
+    _notify();
+  }
+
+  Future<SaveRunResult?> stopAndSaveRecording({
+    bool openDriveSheet = true,
+  }) async {
+    final rec = _recorder;
+    if (rec == null) return null;
+    _recorder = null;
+
+    final bundle = rec.buildBundle(
+      grid: grid,
+      params: params,
+      speedNorm: speedNorm,
+      currentDrivePwm: currentDrivePwm,
+      invertSteer: invertSteer,
+      robotCell: robotCell,
+    );
+    lastSaveStatus = '保存中...';
+    _notify();
+
+    final res = await storage.saveRunBundle(
+      bundle,
+      autoDriveSync: autoDriveSync,
+      openDriveSheet: openDriveSheet,
+    );
+    lastSavedRunId = bundle.runId;
+    lastSaveStatus = switch (res.driveAction) {
+      'webhook_sent' => res.ok ? 'ドライブ自動転送済' : '端末保存済 (転送失敗)',
+      'intent_opened' => res.ok ? '端末保存＋ドライブ起動' : '端末保存済',
+      'local_only' => res.ok ? '端末のみ保存' : '保存エラー',
+      _ => '保存処理完了',
+    };
+    _notify();
+    return res;
+  }
+
+  Future<void> toggleManualRecording() async {
+    if (isRecording) {
+      await stopAndSaveRecording();
+    } else {
+      startRecording(mode: 'manual');
+      status = '手動走行の記録を開始しました（停止時に保存＋ドライブ連携）';
+      _notify();
+    }
+  }
+
+  Future<bool> shareLatestToDrive() async {
+    final ok = await storage.shareRunToDrive(runId: lastSavedRunId);
+    lastSaveStatus = ok ? 'ドライブ共有を起動' : '共有失敗';
+    _notify();
+    return ok;
+  }
+
+  void setAutoDriveSync(bool enabled) {
+    autoDriveSync = enabled;
+    _notify();
+  }
+
+  Future<void> updateDriveWebhookUrl(String url) async {
+    final trimmed = url.trim();
+    await storage.setWebhookUrl(trimmed);
+    driveWebhookUrl = trimmed;
+    _notify();
+  }
+
+  /// 画面表示時や USB 接続時に、センサー開始と USB シリアル自動接続を行う。
+  Future<void> autoSetup() async {
+    try {
+      driveWebhookUrl = await storage.getWebhookUrl();
+    } catch (_) {
+      // ネイティブチャネル未実装環境では無視
+    }
+    try {
+      if (!sensorsOn) {
+        await startSensors();
+      }
+    } catch (_) {
+      // ネイティブチャネル未実装環境では無視
+    }
+    try {
+      if (linkState != Esp32LinkState.connected) {
+        final devices = await link.listDevices();
+        if (devices.isNotEmpty) {
+          await connectSerial();
+        }
+      }
+    } catch (_) {
+      // ネイティブチャネル未実装環境では無視
+    }
+    _notify();
+  }
+
   Future<void> disconnectSerial() async {
     await driver.stop();
     await link.disconnect();
@@ -259,6 +434,8 @@ class RealSession {
       _notify();
       return;
     }
+    final startedHere = !isRecording;
+    if (startedHere) startRecording(mode: 'explore');
     try {
       final result = await driver.explore(
         onFrame: (_, __) => _notify(),
@@ -269,6 +446,42 @@ class RealSession {
           '${result.steps} ステップ。地図をタップするとゴール指定できます';
     } catch (e) {
       status = '探索エラー: $e';
+    } finally {
+      if (startedHere && isRecording) {
+        await stopAndSaveRecording();
+      }
+    }
+    _notify();
+  }
+
+  /// VFH 自律走行で未探索エリア・フロンティアを埋め、フロアマップを作成する。
+  Future<void> runAutoCruise() async {
+    if (latestPose == null) {
+      status = 'ARCore のポーズが得られていません（トラッキングを確認）';
+      _notify();
+      return;
+    }
+    if (linkState != Esp32LinkState.connected) {
+      status = 'ESP32 が接続されていません（USB 接続を確認）';
+      _notify();
+      return;
+    }
+    final startedHere = !isRecording;
+    if (startedHere) startRecording(mode: 'vfh_cruise');
+    try {
+      await driver.cruiseVfh(
+        onFrame: (_, __) => _notify(),
+      );
+      explored = true;
+      status = 'フロアマップ作成終了: マッピング面積 '
+          '${mappedAreaM2.toStringAsFixed(1)} m²（カバー率 '
+          '${(grid.coverage * 100).toStringAsFixed(1)}%）';
+    } catch (e) {
+      status = 'フロアマップ作成エラー: $e';
+    } finally {
+      if (startedHere && isRecording) {
+        await stopAndSaveRecording();
+      }
     }
     _notify();
   }
@@ -276,6 +489,8 @@ class RealSession {
   Future<void> goToGoal() async {
     final g = goal;
     if (g == null) return;
+    final startedHere = !isRecording;
+    if (startedHere) startRecording(mode: 'go_to_goal');
     try {
       final result = await driver.goTo(
         goal: g,
@@ -288,18 +503,42 @@ class RealSession {
       path = null;
     } catch (e) {
       status = '移動エラー: $e';
+    } finally {
+      if (startedHere && isRecording) {
+        await stopAndSaveRecording();
+      }
     }
     _notify();
   }
 
   Future<void> emergencyStop() async {
+    final wasBusy = driver.isBusy;
     await driver.stop();
     status = '停止指令を送りました';
+    if (!wasBusy && isRecording) {
+      await stopAndSaveRecording();
+    }
     _notify();
   }
 
   Future<void> jog(String ch) async {
-    await link.sendJog(ch);
+    final pwm = currentDrivePwm;
+    final leftSteer = invertSteer ? 255 : -255;
+    final rightSteer = invertSteer ? -255 : 255;
+    switch (ch) {
+      case 's':
+        await link.sendJog('s');
+      case 'f':
+        await link.sendDriveSteer(pwm, 0);
+      case 'b':
+        await link.sendDriveSteer(-pwm, 0);
+      case 'l':
+        await link.sendDriveSteer(pwm, leftSteer);
+      case 'r':
+        await link.sendDriveSteer(pwm, rightSteer);
+      default:
+        await link.sendJog(ch);
+    }
     _notify();
   }
 

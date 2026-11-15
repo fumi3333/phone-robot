@@ -51,6 +51,9 @@ abstract class Esp32Link {
   /// 最後に送信したコマンド文字列（UI の「現在の指令」表示用）。
   String get lastCommand;
 
+  /// 駆動・操舵指令を送信した直後に呼ばれるコールバック（走行ログ記録用）。
+  void Function(int drive, int steer)? onCommandSent;
+
   Future<List<Esp32Device>> listDevices();
 
   /// 接続する。[deviceId] が null なら先頭の対応デバイスを使う。
@@ -73,15 +76,29 @@ abstract class Esp32Link {
 
 /// drive / steer の整数レンジ変換。
 ///
-/// 注意: ファーム v2.0（esp32_toyota86）の "c,drive,steer" の値域は
-/// ファーム側ソースで最終確認が必要。ここでは -100..100 を既定とし、
-/// 実機でファームの期待範囲と食い違う場合はこの定数だけを直す。
+/// ファーム（esp32_toyota86 / esp32_toyota86_asbuilt）の "c,drive,steer" は
+/// -255..255 の PWM duty を受け付ける。駆動モーターは静止摩擦デッドゾーンを
+/// 超える [minEffectiveDrivePwm..maxValue] へ [driveOf] でマッピングする。
 class SerialCommandScale {
-  static const int maxValue = 100;
+  static const int maxValue = 255;
+  static const int minEffectiveDrivePwm = 140;
 
   static int of(double normalized) {
     final v = (normalized.clamp(-1.0, 1.0) * maxValue).round();
     return v;
+  }
+
+  /// 駆動モーター用: 0 は 0、非ゼロはギアボックスの静止摩擦を超える
+  /// [minEffectiveDrivePwm..maxValue] に線形マッピングする。
+  static int driveOf(double normalized) {
+    final clamped = normalized.clamp(-1.0, 1.0);
+    final mag = clamped.abs();
+    if (mag < 1e-3) return 0;
+    final pwm = (minEffectiveDrivePwm +
+            mag * (maxValue - minEffectiveDrivePwm))
+        .round()
+        .clamp(minEffectiveDrivePwm, maxValue);
+    return clamped < 0 ? -pwm : pwm;
   }
 }
 
@@ -96,6 +113,9 @@ class MethodChannelEsp32Link implements Esp32Link {
   Esp32LinkState _state = Esp32LinkState.disconnected;
   String _lastCommand = '(なし)';
   Stream<Esp32LinkState>? _states;
+
+  @override
+  void Function(int drive, int steer)? onCommandSent;
 
   @override
   Esp32LinkState get state => _state;
@@ -136,11 +156,17 @@ class MethodChannelEsp32Link implements Esp32Link {
       'deviceId': deviceId,
       'baudRate': baudRate,
     });
+    if (ok == true) {
+      _state = Esp32LinkState.connected;
+    }
     return ok ?? false;
   }
 
   @override
-  Future<void> disconnect() => _method.invokeMethod<void>('disconnect');
+  Future<void> disconnect() async {
+    await _method.invokeMethod<void>('disconnect');
+    _state = Esp32LinkState.disconnected;
+  }
 
   @override
   Future<bool> send(String text) async {
@@ -150,9 +176,18 @@ class MethodChannelEsp32Link implements Esp32Link {
   }
 
   @override
-  Future<bool> sendDriveSteer(int drive, int steer) =>
-      send('c,$drive,$steer\n');
+  Future<bool> sendDriveSteer(int drive, int steer) async {
+    final ok = await send('c,$drive,$steer\n');
+    onCommandSent?.call(drive, steer);
+    return ok;
+  }
 
   @override
-  Future<bool> sendJog(String ch) => send(ch);
+  Future<bool> sendJog(String ch) async {
+    final ok = await send(ch);
+    if (ch == 's') {
+      onCommandSent?.call(0, 0);
+    }
+    return ok;
+  }
 }

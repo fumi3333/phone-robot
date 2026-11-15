@@ -398,8 +398,11 @@ class ArCoreManager(private val activity: Activity) {
             val rowFrom = (h * 0.40).toInt()
             val rowTo = (h * 0.60).toInt().coerceAtLeast(rowFrom + 1)
             for (i in 0 until RAY_COUNT) {
+                // core 側は +angle が反時計回り（左）、-angle が時計回り（右）。
+                // 画像 u 座標は左=0・右=w-1 のため、符号を引いて左右を一致させる
+                // （i=0 が右 -30° で u > cxDepth、i=20 が左 +30° で u < cxDepth）。
                 val angleRad = Math.toRadians(-30.0 + 3.0 * i)
-                var u = (cxDepth + fxDepth * tan(angleRad)).roundToInt()
+                var u = (cxDepth - fxDepth * tan(angleRad)).roundToInt()
                 if (u < 0) u = 0
                 if (u > w - 1) u = w - 1
                 val z = sampleRay(

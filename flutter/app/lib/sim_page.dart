@@ -131,52 +131,95 @@ class _SimPageState extends State<SimPage> {
     });
   }
 
+  Widget _buildSimMap() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        return GestureDetector(
+          onTapDown: (d) => _onTapMap(d, size),
+          child: CustomPaint(
+            size: size,
+            painter: MapPainter(
+              logOdds: _displayGrid,
+              gridW: _params.gridW,
+              gridH: _params.gridH,
+              robot: _displayRobot,
+              goal: _goal,
+              path: _path,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('シミュレーションモード')),
-      body: Column(
-        children: [
-          Padding(padding: const EdgeInsets.all(12), child: Text(_status)),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final size = Size(constraints.maxWidth, constraints.maxHeight);
-                return GestureDetector(
-                  onTapDown: (d) => _onTapMap(d, size),
-                  child: CustomPaint(
-                    size: size,
-                    painter: MapPainter(
-                      logOdds: _displayGrid,
-                      gridW: _params.gridW,
-                      gridH: _params.gridH,
-                      robot: _displayRobot,
-                      goal: _goal,
-                      path: _path,
+      body: SafeArea(
+        top: false,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isLandscape = constraints.maxWidth > constraints.maxHeight;
+            if (isLandscape) {
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(child: _buildSimMap()),
+                  const VerticalDivider(width: 1, color: Color(0xFFE5E7EB)),
+                  SizedBox(
+                    width: 240,
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(_status),
+                          const SizedBox(height: 12),
+                          FilledButton(
+                            onPressed: _startExploration,
+                            child: const Text('探索開始'),
+                          ),
+                          const SizedBox(height: 8),
+                          FilledButton.tonal(
+                            onPressed: _path == null ? null : _goToGoal,
+                            child: const Text('ゴールへ移動'),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                );
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+                ],
+              );
+            }
+            return Column(
               children: [
-                FilledButton(
-                  onPressed: _startExploration,
-                  child: const Text('探索開始'),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+                  child: Text(_status),
                 ),
-                const SizedBox(width: 12),
-                FilledButton.tonal(
-                  onPressed: _path == null ? null : _goToGoal,
-                  child: const Text('ゴールへ移動'),
+                Expanded(child: _buildSimMap()),
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      FilledButton(
+                        onPressed: _startExploration,
+                        child: const Text('探索開始'),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton.tonal(
+                        onPressed: _path == null ? null : _goToGoal,
+                        child: const Text('ゴールへ移動'),
+                      ),
+                    ],
+                  ),
                 ),
               ],
-            ),
-          ),
-        ],
+            );
+          },
+        ),
       ),
     );
   }

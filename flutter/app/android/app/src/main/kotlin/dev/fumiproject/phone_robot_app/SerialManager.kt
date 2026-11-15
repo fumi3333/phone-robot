@@ -169,6 +169,11 @@ class SerialManager(private val context: Context) {
         return try {
             p.open(connection)
             p.setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+            try {
+                p.dtr = false
+                p.rts = false
+            } catch (_: Exception) {
+            }
             port = p
             val io = SerialInputOutputManager(p, object : SerialInputOutputManager.Listener {
                 override fun onNewData(data: ByteArray) {

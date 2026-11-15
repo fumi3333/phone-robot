@@ -19,11 +19,13 @@ import io.flutter.plugin.common.MethodChannel
  *  - EventChannel  "phone_robot/serial/state"    : リンク状態文字列
  *  - EventChannel  "phone_robot/serial/rx"       : 受信テキスト
  *  - MethodChannel "phone_robot/system"  : setKeepScreenOn（実機モード中の画面常時点灯、R4）
+ *  - MethodChannel "phone_robot/storage" : saveRunBundle / shareRunToDrive / getWebhookUrl / setWebhookUrl
  */
 class MainActivity : FlutterActivity() {
 
     private var arCore: ArCoreManager? = null
     private var serial: SerialManager? = null
+    private var logStorage: LogStorageManager? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -33,6 +35,8 @@ class MainActivity : FlutterActivity() {
         arCore = ar
         val se = SerialManager(this)
         serial = se
+        val ls = LogStorageManager(this)
+        logStorage = ls
 
         MethodChannel(messenger, "phone_robot/arcore").setMethodCallHandler { call, result ->
             when (call.method) {
@@ -82,6 +86,21 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                     result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(messenger, "phone_robot/storage").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "saveRunBundle" -> ls.saveRunBundle(call, result)
+                "shareRunToDrive" -> result.success(
+                    ls.shareRunToDriveInternal(call.argument<String>("runId"))
+                )
+                "getWebhookUrl" -> result.success(ls.getWebhookUrl())
+                "setWebhookUrl" -> {
+                    ls.setWebhookUrl(call.argument<String>("url") ?: "")
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }

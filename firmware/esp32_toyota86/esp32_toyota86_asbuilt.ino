@@ -29,8 +29,8 @@ const int CH_DRIVE2 = 1;
 const int CH_STEER1 = 2;
 const int CH_STEER2 = 3;
 
-// 室内走行用 安全スピード上限 (最大255中、160に制限)
-const int MAX_DRIVE_PWM = 160;
+// 室内走行用 安全スピード上限 (リミッター解除: 最大255フルパワー)
+const int MAX_DRIVE_PWM = 255;
 
 // 通信途絶監視タイマー
 unsigned long lastCmdTime = 0;
@@ -38,7 +38,7 @@ const unsigned long TIMEOUT_MS = 400;
 
 // ステアリング過熱保護 (トイラジコンの振り切りステアリングを過熱から守る)
 unsigned long steerStartTime = 0;
-const unsigned long MAX_STEER_HOLD_MS = 600; // 0.6秒以上連続でハンドルを切り続けない
+const unsigned long MAX_STEER_HOLD_MS = 1000; // 1.0秒連続でハンドルを切ったら保持トルクへ移行
 
 // LEDC 出力ヘルパー: core 3.x の ledcWrite はピン番号、2.x はチャンネル番号を取る
 void pwmWrite(int pin, int ch, int duty) {
@@ -96,26 +96,15 @@ void setDrive(int speed) {
   }
 }
 
-// 操舵モーター制御 (steer: -255 〜 +255, 負=左, 正=右)
+// 操舵モーター制御 (steer: 負=左, 正=右, 0=中立)
+// トイラジコンの振り切りステアリングは純正プロポ同様、手加減なしの直流100%全開でバネを押し切る
 void setSteer(int steer) {
-  steer = constrain(steer, -255, 255);
-  
-  // ステアリング保持時間が長すぎる場合は力を弱めて過熱防止
-  if (steer != 0) {
-    if (steerStartTime == 0) steerStartTime = millis();
-    else if (millis() - steerStartTime > MAX_STEER_HOLD_MS) {
-      steer = (steer > 0) ? 120 : -120; // 保持トルクを半分に低減
-    }
-  } else {
-    steerStartTime = 0;
-  }
-
   if (steer < 0) {
-    pwmWrite(PIN_STEER_IN3, CH_STEER1, -steer);
+    pwmWrite(PIN_STEER_IN3, CH_STEER1, 255); // 左 100% 直流フルパワー
     pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
   } else if (steer > 0) {
     pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
-    pwmWrite(PIN_STEER_IN4, CH_STEER2, steer);
+    pwmWrite(PIN_STEER_IN4, CH_STEER2, 255); // 右 100% 直流フルパワー
   } else {
     pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
     pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
