@@ -857,6 +857,9 @@ class RealDriver {
 
     try {
       _status('フロアマップ作成（VFH）を開始…');
+      if (_gateBlocks(await _gatePose())) {
+        return;
+      }
       final start = currentCell;
       grid.logOdds[grid.index(start.r, start.c)] = p.lFree;
       await captureScan();

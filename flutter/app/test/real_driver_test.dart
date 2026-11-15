@@ -410,6 +410,10 @@ void main() {
       return 0.45;
     }));
 
+    final initPose = Pose(3.0, 2.5, math.pi / 2);
+    poseFeed.addPose(initPose);
+    feed.add(Scan(initPose, ranges));
+
     final t = Timer.periodic(const Duration(milliseconds: 40), (_) {
       final p = Pose(3.0, 2.5, math.pi / 2);
       poseFeed.addPose(p);
