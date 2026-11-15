@@ -69,13 +69,15 @@ jobs:
       - name: Prepare APK artifact
         run: |
           mkdir -p dist
+          TAG="${{ github.ref_name }}"
+          cp flutter/app/build/app/outputs/flutter-apk/app-release.apk "dist/phone-robot-app-${TAG}.apk"
           cp flutter/app/build/app/outputs/flutter-apk/app-release.apk dist/phone-robot-app.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name == 'main' && 'v0.3.0' || github.ref_name }}
-          name: ${{ github.ref_name == 'main' && 'v0.3.0' || github.ref_name }} - Phone Robot App（実機マップ＋ドライブ記録対応）
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }} - Phone Robot App
           body: |
             ## Phone Robot アプリ（Android APK）
 
@@ -89,9 +91,11 @@ jobs:
             - Note 10+ リスク修正 R1〜R4 とシミュレーションモード内蔵
 
             ### インストール手順
-            1. 下の **`phone-robot-app.apk`** をスマートフォン（Galaxy Note 10+ 等）でダウンロード
+            1. 下の **`phone-robot-app-${{ github.ref_name }}.apk`**（または `phone-robot-app.apk`）をスマートフォン（Galaxy Note 10+ 等）でダウンロード
             2. ダウンロードした APK をタップしてインストール（「提供元不明のアプリ」を許可）
-          files: dist/phone-robot-app.apk
+          files: |
+            dist/phone-robot-app-*.apk
+            dist/phone-robot-app.apk
           draft: false
           prerelease: false
         env:
