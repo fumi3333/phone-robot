@@ -407,14 +407,12 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               ),
               segments: const [
                 ButtonSegment(
-                  key: Key('mode_walk'),
                   value: _WorkMode.walkScan,
-                  label: Text('① 歩いてマップ測定'),
+                  label: Text('① 歩いてマップ測定', key: Key('mode_walk')),
                 ),
                 ButtonSegment(
-                  key: Key('mode_rc'),
                   value: _WorkMode.rcControl,
-                  label: Text('② ラジコン操縦'),
+                  label: Text('② ラジコン操縦', key: Key('mode_rc')),
                 ),
               ],
               selected: {_workMode},
@@ -1153,14 +1151,12 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 ),
                 segments: const [
                   ButtonSegment(
-                    key: Key('input_toggle_buttons'),
                     value: _RcInputType.buttons,
-                    label: Text('ボタン'),
+                    label: Text('ボタン', key: Key('input_toggle_buttons')),
                   ),
                   ButtonSegment(
-                    key: Key('input_toggle_flick'),
                     value: _RcInputType.flick,
-                    label: Text('フリック'),
+                    label: Text('フリック', key: Key('input_toggle_flick')),
                   ),
                 ],
                 selected: {_rcInputType},
