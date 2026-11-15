@@ -57,8 +57,19 @@ class OccupancyGrid {
     final by = scan.pose.y;
     final bh = scan.pose.heading;
 
+    int? prevEr;
+    int? prevEc;
+    double? prevR;
+
     for (var i = 0; i < scan.ranges.length; i++) {
       final rMeas = scan.ranges[i];
+      if (rMeas.isNaN || rMeas <= 0) {
+        // ToF の信頼度不足等「計測なし」レイは 4m 偽自由空間を描かないようスキップする
+        prevEr = null;
+        prevEc = null;
+        prevR = null;
+        continue;
+      }
       final ang = bh + offsets[i];
       final ca = math.cos(ang);
       final sa = math.sin(ang);
@@ -83,7 +94,36 @@ class OccupancyGrid {
         final er = ((by + sa * rMeas) / p.cellSize).floor();
         if (er >= 0 && er < p.gridH && ec >= 0 && ec < p.gridW) {
           hit.add(er * p.gridW + ec);
+          if (rMeas <= p.maxRange &&
+              prevEr != null &&
+              prevEc != null &&
+              prevR != null &&
+              (rMeas - prevR).abs() <= 0.25) {
+            // 隣接レイが連続した壁面に当たっている場合は途切れを補間して視認性を高める
+            final steps = math.max((er - prevEr).abs(), (ec - prevEc).abs());
+            if (steps > 1 && steps <= 4) {
+              for (var k = 1; k < steps; k++) {
+                final t = k / steps;
+                final ir = (prevEr + (er - prevEr) * t).round();
+                final ic = (prevEc + (ec - prevEc) * t).round();
+                if (ir >= 0 && ir < p.gridH && ic >= 0 && ic < p.gridW) {
+                  hit.add(ir * p.gridW + ic);
+                }
+              }
+            }
+          }
+          prevEr = er;
+          prevEc = ec;
+          prevR = rMeas;
+        } else {
+          prevEr = null;
+          prevEc = null;
+          prevR = null;
         }
+      } else {
+        prevEr = null;
+        prevEc = null;
+        prevR = null;
       }
     }
 

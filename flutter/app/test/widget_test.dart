@@ -77,6 +77,19 @@ void main() {
 
       expect(find.byKey(const Key('flick_pad')), findsOneWidget);
       expect(find.text('▲ 前'), findsNothing);
+
+      // 設定シートからデモマップを表示すると地図がメイン表示に切り替わり距離バーも更新される
+      await tester.tap(find.byKey(const Key('settings_btn')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('demo_preview_btn')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('demo_preview_btn')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('obstacle_dist_bar')), findsOneWidget);
+      expect(find.text('カメラ (タップで拡大)'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('mode_walk')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('デモマップ表示中'), findsOneWidget);
     } finally {
       await tester.pump(const Duration(milliseconds: 60));
       session.dispose();

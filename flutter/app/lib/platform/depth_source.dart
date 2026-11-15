@@ -28,7 +28,8 @@ abstract class DepthSource {
 /// プラットフォームチャネル経由の Depth API 実装。
 ///
 /// ネイティブ側が信頼度フィルタ済みの 21 本の距離 [m] を送る契約。
-/// 負値は「計測なし」を表し、無限遠へ変換する。
+/// 負値または 0 以下は「計測なし（ToF 信頼度不足）」を表し、`double.nan` へ
+/// 変換して占有格子更新をスキップさせる（開空間の `double.infinity` と区別）。
 class MethodChannelDepthSource implements DepthSource {
   static const EventChannel _events = EventChannel('phone_robot/depth');
 
@@ -44,7 +45,7 @@ class MethodChannelDepthSource implements DepthSource {
       final ranges = Float32List(params.nRays);
       for (var i = 0; i < params.nRays && i < raw.length; i++) {
         final v = (raw[i] as num).toDouble();
-        ranges[i] = v < 0 ? double.infinity : v;
+        ranges[i] = (v.isNaN || v <= 0) ? double.nan : v;
       }
       return Scan(currentPose(), ranges);
     });

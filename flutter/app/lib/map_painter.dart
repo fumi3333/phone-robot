@@ -167,6 +167,33 @@ class MapPainter extends CustomPainter {
       }
     }
 
+    if (rp != null) {
+      // カメラが現在向いている視野角（±halfFov、半径 1.5m）を薄い扇形で表示する
+      final fovCenter = worldToCanvas(rp.x, rp.y);
+      final coneR = 1.5 * pxPerM;
+      if (coneR >= 6.0) {
+        final halfFov = mappingParams.fovRad / 2.0;
+        final fovRect = Rect.fromCircle(center: fovCenter, radius: coneR);
+        canvas.drawArc(
+          fovRect,
+          -rp.heading - halfFov,
+          mappingParams.fovRad,
+          true,
+          Paint()..color = const Color.fromARGB(28, 14, 165, 233),
+        );
+        canvas.drawArc(
+          fovRect,
+          -rp.heading - halfFov,
+          mappingParams.fovRad,
+          true,
+          Paint()
+            ..color = const Color.fromARGB(95, 2, 132, 199)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.2,
+        );
+      }
+    }
+
     final scan = latestScan;
     if (scan != null && scan.ranges.isNotEmpty) {
       final offsets = rayOffsets(mappingParams);
@@ -182,7 +209,8 @@ class MapPainter extends CustomPainter {
       final n = math.min(offsets.length, scan.ranges.length);
       for (var i = 0; i < n; i++) {
         final r = scan.ranges[i];
-        final measured = r.isFinite && r > 0;
+        if (r.isNaN || r <= 0) continue;
+        final measured = r.isFinite;
         final dist = measured
             ? math.min(r, mappingParams.maxRange)
             : math.min(2.5, mappingParams.maxRange);

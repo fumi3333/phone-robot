@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:phone_robot_core/phone_robot_core.dart';
 
@@ -82,6 +83,7 @@ class RealSession {
 
   Esp32LinkState linkState = Esp32LinkState.disconnected;
   bool sensorsOn = false;
+  bool isDemoMode = false;
   bool explored = false;
   String status = '実機モード: まずセンサー開始と ESP32 接続をしてください';
   Cell? goal;
@@ -174,7 +176,7 @@ class RealSession {
   /// 現在の前方カメラ 21 本深度レイから直感的な障害物アラートを算出する。
   ObstacleAlert get obstacleAlert {
     final scan = latestScan;
-    if (!sensorsOn || scan == null || scan.ranges.isEmpty) {
+    if ((!sensorsOn && !isDemoMode) || scan == null || scan.ranges.isEmpty) {
       return const ObstacleAlert(
         severity: ObstacleSeverity.unknown,
         message: 'カメラで前方を計測中…',
@@ -186,21 +188,23 @@ class RealSession {
     final cEnd = (n * 0.67).ceil().clamp(cStart, n - 1);
     final frontMin = RunRecorder.frontMinDepthM(scan);
 
-    double avgSide(int from, int to) {
-      if (from > to) return 2.5;
+    double? avgMeasuredSide(int from, int to) {
+      if (from > to) return null;
       var sum = 0.0;
       var cnt = 0;
       for (var i = from; i <= to; i++) {
         final r = ranges[i];
-        sum += (r.isFinite && r > 0) ? r.clamp(0.05, params.maxRange) : 2.5;
-        cnt++;
+        if (r.isFinite && r > 0) {
+          sum += r.clamp(0.05, params.maxRange);
+          cnt++;
+        }
       }
-      return cnt > 0 ? sum / cnt : 2.5;
+      return cnt > 0 ? sum / cnt : null;
     }
 
     // ArCoreManager 側: i=0 が右 (-30°)、i=n-1 が左 (+30°)
-    final rightClear = avgSide(0, math.max(0, cStart - 1));
-    final leftClear = avgSide(math.min(n - 1, cEnd + 1), n - 1);
+    final rightClear = avgMeasuredSide(0, math.max(0, cStart - 1));
+    final leftClear = avgMeasuredSide(math.min(n - 1, cEnd + 1), n - 1);
 
     if (frontMin == null) {
       return ObstacleAlert(
@@ -220,14 +224,16 @@ class RealSession {
       );
     }
     if (frontMin < 0.80) {
-      final openSide = leftClear >= rightClear ? '左' : '右';
+      final hasSide = leftClear != null || rightClear != null;
+      final openSide = (leftClear ?? 0) >= (rightClear ?? 0) ? '左' : '右';
       return ObstacleAlert(
         severity: ObstacleSeverity.caution,
         frontMinM: frontMin,
         leftClearM: leftClear,
         rightClearM: rightClear,
-        message:
-            '⚠️ 前方に障害物あり (${frontMin.toStringAsFixed(2)} m) — $openSide側が空いています',
+        message: hasSide
+            ? '⚠️ 前方に障害物あり (${frontMin.toStringAsFixed(2)} m) — $openSide側が空いています'
+            : '⚠️ 前方に障害物あり (${frontMin.toStringAsFixed(2)} m)',
       );
     }
     return ObstacleAlert(
@@ -263,6 +269,7 @@ class RealSession {
 
   Future<void> startSensors() async {
     if (sensorsOn) return;
+    isDemoMode = false;
     await poseSource.start();
     sensorsOn = true;
     _sensorsStartedAt = DateTime.now();
@@ -409,11 +416,90 @@ class RealSession {
 
   void resetMap() {
     if (driver.isBusy) return;
+    isDemoMode = false;
     grid.logOdds.fillRange(0, grid.logOdds.length, 0.0);
     goal = null;
     path = null;
     explored = false;
     status = 'マップをリセットしました';
+    _notify();
+  }
+
+  /// カメラ・実車なしでも新しいマップ描画・連続壁補間・距離バナーを確認できるデモを生成する。
+  void loadDemoPreviewMap() {
+    if (driver.isBusy) return;
+    isDemoMode = true;
+    grid.logOdds.fillRange(0, grid.logOdds.length, 0.0);
+    goal = null;
+    path = null;
+
+    // 部屋外周壁＋左の棚＋正面やや手前のテーブル（現在地から左・正面・右の違いが出る配置）
+    const boxes = <({double minX, double maxX, double minY, double maxY})>[
+      (minX: -1.90, maxX: -1.75, minY: -1.80, maxY: 1.90),
+      (minX: 1.75, maxX: 1.90, minY: -1.80, maxY: 1.90),
+      (minX: -1.90, maxX: 1.90, minY: 1.75, maxY: 1.90),
+      (minX: -1.90, maxX: 1.90, minY: -1.90, maxY: -1.75),
+      (minX: -0.35, maxX: 0.35, minY: 0.72, maxY: 1.15),
+      (minX: -1.45, maxX: -0.90, minY: 0.10, maxY: 0.85),
+    ];
+
+    final cx = params.roomW / 2.0;
+    final cy = params.roomH / 2.0;
+    final offsets = rayOffsets(params);
+
+    Scan castDemoScan(double relX, double relY, double heading) {
+      final pose = Pose(cx + relX, cy + relY, heading);
+      final ranges = Float32List(params.nRays);
+      for (var i = 0; i < params.nRays; i++) {
+        final ang = heading + offsets[i];
+        final ca = math.cos(ang);
+        final sa = math.sin(ang);
+        var hit = double.nan;
+        for (var d = 0.15; d <= params.maxRange; d += 0.03) {
+          final px = relX + ca * d;
+          final py = relY + sa * d;
+          var blocked = false;
+          for (final b in boxes) {
+            if (px >= b.minX && px <= b.maxX && py >= b.minY && py <= b.maxY) {
+              blocked = true;
+              break;
+            }
+          }
+          if (blocked) {
+            hit = d;
+            break;
+          }
+        }
+        ranges[i] = hit;
+      }
+      return Scan(pose, ranges);
+    }
+
+    const demoSteps = <({double x, double y, double h})>[
+      (x: 0.0, y: -0.90, h: 1.57),
+      (x: 0.0, y: -0.90, h: 2.35),
+      (x: 0.0, y: -0.90, h: 0.78),
+      (x: 0.0, y: -0.45, h: 1.95),
+      (x: 0.0, y: -0.45, h: 1.15),
+      (x: 0.0, y: 0.0, h: 2.25),
+      (x: 0.0, y: 0.0, h: 0.85),
+      (x: 0.0, y: 0.0, h: math.pi / 2),
+    ];
+
+    poseFeed.setTrackingState('DEMO');
+    sensorHealth = 'デモ表示';
+    Scan? lastScan;
+    for (final st in demoSteps) {
+      final scan = castDemoScan(st.x, st.y, st.h);
+      poseFeed.addPose(scan.pose);
+      grid.applyScan(scan);
+      lastScan = scan;
+    }
+    if (lastScan != null) {
+      feed.add(lastScan);
+    }
+    explored = true;
+    status = 'デモマップ表示中: 赤=壁・障害物 / 白=通路 / 青扇形=カメラ向き';
     _notify();
   }
 

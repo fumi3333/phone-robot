@@ -226,155 +226,178 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
             }
 
             return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          '設定・テスト機能',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            '設定・テスト機能',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        IconButton(
-                          onPressed: () => Navigator.of(ctx).pop(),
-                          icon: const Icon(Icons.close),
-                        ),
-                      ],
-                    ),
-                    const Divider(height: 12),
-                    SwitchListTile(
-                      dense: true,
-                      title: const Text('ARCore センサー'),
-                      subtitle: Text(
-                        '状態: ${_session.trackingState} (${_session.sensorHealth})',
+                          IconButton(
+                            onPressed: () => Navigator.of(ctx).pop(),
+                            icon: const Icon(Icons.close),
+                          ),
+                        ],
                       ),
-                      value: _session.sensorsOn,
-                      onChanged: (v) async {
-                        if (v) {
-                          await _session.startSensors();
-                        } else {
-                          await _session.stopSensors();
-                        }
-                        refresh();
-                      },
-                    ),
-                    SwitchListTile(
-                      dense: true,
-                      title: const Text('操舵反転（左右モーター極性入れ替え）'),
-                      value: _session.invertSteer,
-                      onChanged: (v) {
-                        _session.setInvertSteer(v);
-                        refresh();
-                      },
-                    ),
-                    SwitchListTile(
-                      dense: true,
-                      title: const Text('記録停止時の Webhook 自動転送'),
-                      subtitle: const Text('Webhook URL 未設定時は自動でドライブ画面を開きません'),
-                      value: _session.autoDriveSync,
-                      onChanged: (v) {
-                        _session.setAutoDriveSync(v);
-                        refresh();
-                      },
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        const Text('測定エリア:', style: TextStyle(fontSize: 13)),
-                        const SizedBox(width: 10),
-                        ChoiceChip(
-                          label: const Text('部屋 6×5m'),
-                          selected: !_floorScale,
-                          onSelected: _session.busy
-                              ? null
-                              : (sel) async {
-                                  if (sel) {
-                                    Navigator.of(ctx).pop();
-                                    await _switchScale(false);
-                                  }
-                                },
+                      const Divider(height: 12),
+                      SwitchListTile(
+                        dense: true,
+                        title: const Text('ARCore センサー'),
+                        subtitle: Text(
+                          '状態: ${_session.trackingState} (${_session.sensorHealth})',
                         ),
-                        const SizedBox(width: 8),
-                        ChoiceChip(
-                          label: const Text('フロア 24×24m'),
-                          selected: _floorScale,
-                          onSelected: _session.busy
-                              ? null
-                              : (sel) async {
-                                  if (sel) {
-                                    Navigator.of(ctx).pop();
-                                    await _switchScale(true);
-                                  }
-                                },
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        Navigator.of(ctx).pop();
-                        await _editWebhookUrl();
-                      },
-                      icon: const Icon(Icons.link, size: 18),
-                      label: Text(
-                        _session.driveWebhookUrl.isEmpty
-                            ? 'Google ドライブ Webhook URL を設定'
-                            : 'Webhook URL を編集（設定済み）',
+                        value: _session.sensorsOn,
+                        onChanged: (v) async {
+                          if (v) {
+                            await _session.startSensors();
+                          } else {
+                            await _session.stopSensors();
+                          }
+                          refresh();
+                        },
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      '上級: 自律走行テスト（ラジコン動作確認後に使用）',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: _session.busy
-                                ? null
-                                : () {
-                                    Navigator.of(ctx).pop();
-                                    unawaited(_session.runAutoCruise());
-                                  },
-                            child: const Text('VFH自律'),
-                          ),
+                      SwitchListTile(
+                        dense: true,
+                        title: const Text('操舵反転（左右モーター極性入れ替え）'),
+                        value: _session.invertSteer,
+                        onChanged: (v) {
+                          _session.setInvertSteer(v);
+                          refresh();
+                        },
+                      ),
+                      SwitchListTile(
+                        dense: true,
+                        title: const Text('記録停止時の Webhook 自動転送'),
+                        subtitle: const Text(
+                          'Webhook URL 未設定時は自動でドライブ画面を開きません',
                         ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: _session.busy
+                        value: _session.autoDriveSync,
+                        onChanged: (v) {
+                          _session.setAutoDriveSync(v);
+                          refresh();
+                        },
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          const Text('測定エリア:', style: TextStyle(fontSize: 13)),
+                          const SizedBox(width: 10),
+                          ChoiceChip(
+                            label: const Text('部屋 6×5m'),
+                            selected: !_floorScale,
+                            onSelected: _session.busy
                                 ? null
-                                : () {
-                                    Navigator.of(ctx).pop();
-                                    unawaited(_session.runExploration());
+                                : (sel) async {
+                                    if (sel) {
+                                      Navigator.of(ctx).pop();
+                                      await _switchScale(false);
+                                    }
                                   },
-                            child: const Text('A*探索'),
                           ),
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: _session.path == null || _session.busy
+                          const SizedBox(width: 8),
+                          ChoiceChip(
+                            label: const Text('フロア 24×24m'),
+                            selected: _floorScale,
+                            onSelected: _session.busy
                                 ? null
-                                : () {
-                                    Navigator.of(ctx).pop();
-                                    unawaited(_session.goToGoal());
+                                : (sel) async {
+                                    if (sel) {
+                                      Navigator.of(ctx).pop();
+                                      await _switchScale(true);
+                                    }
                                   },
-                            child: const Text('ゴール'),
                           ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      FilledButton.tonalIcon(
+                        key: const Key('demo_preview_btn'),
+                        onPressed: _session.busy
+                            ? null
+                            : () {
+                                Navigator.of(ctx).pop();
+                                _session.loadDemoPreviewMap();
+                                setState(() {
+                                  _cameraMain = false;
+                                  _followRobot = true;
+                                });
+                              },
+                        icon: const Icon(Icons.play_arrow, size: 18),
+                        label: const Text('▶ 部屋マップのデモ表示（動作確認）'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          Navigator.of(ctx).pop();
+                          await _editWebhookUrl();
+                        },
+                        icon: const Icon(Icons.link, size: 18),
+                        label: Text(
+                          _session.driveWebhookUrl.isEmpty
+                              ? 'Google ドライブ Webhook URL を設定'
+                              : 'Webhook URL を編集（設定済み）',
                         ),
-                      ],
-                    ),
-                  ],
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        '上級: 自律走行テスト（ラジコン動作確認後に使用）',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: _session.busy
+                                  ? null
+                                  : () {
+                                      Navigator.of(ctx).pop();
+                                      unawaited(_session.runAutoCruise());
+                                    },
+                              child: const Text('VFH自律'),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: _session.busy
+                                  ? null
+                                  : () {
+                                      Navigator.of(ctx).pop();
+                                      unawaited(_session.runExploration());
+                                    },
+                              child: const Text('A*探索'),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: _session.path == null || _session.busy
+                                  ? null
+                                  : () {
+                                      Navigator.of(ctx).pop();
+                                      unawaited(_session.goToGoal());
+                                    },
+                              child: const Text('ゴール'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             );
@@ -457,27 +480,46 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
       ObstacleSeverity.clear => const Color(0xFF059669),
       ObstacleSeverity.unknown => const Color(0xFF475569),
     };
+    String fmtM(double? v) => v == null ? '—' : '${v.toStringAsFixed(1)}m';
+    final distBar =
+        '左 ${fmtM(alert.leftClearM)}  |  正面 ${fmtM(alert.frontMinM)}  |  右 ${fmtM(alert.rightClearM)}';
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       color: bg,
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: Text(
-              alert.message,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  alert.message,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
               ),
-            ),
+              Text(
+                '記録 ${_session.mappedAreaM2.toStringAsFixed(1)}m²',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
           ),
+          const SizedBox(height: 2),
           Text(
-            '記録 ${_session.mappedAreaM2.toStringAsFixed(1)}m²',
+            distBar,
+            key: const Key('obstacle_dist_bar'),
             style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
+              color: Color(0xFFE2E8F0),
+              fontSize: 11,
               fontWeight: FontWeight.w600,
             ),
           ),

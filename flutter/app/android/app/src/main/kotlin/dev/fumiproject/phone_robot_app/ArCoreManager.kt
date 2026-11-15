@@ -38,8 +38,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.atan2
-import kotlin.math.roundToInt
-import kotlin.math.tan
+import kotlin.math.hypot
 
 /**
  * ARCore のセッション管理と、Dart 側チャネルへの配信。
@@ -324,6 +323,14 @@ class ArCoreManager(
         }
     }
 
+    private fun displaySizeForRotation(rot: Int): Pair<Int, Int> {
+        return if (rot == Surface.ROTATION_0 || rot == Surface.ROTATION_180) {
+            PREVIEW_HEIGHT to PREVIEW_WIDTH
+        } else {
+            PREVIEW_WIDTH to PREVIEW_HEIGHT
+        }
+    }
+
     /** 最小 EGL 環境で session.update() を 30Hz 上限で回し、ライブプレビュー用テクスチャも更新する。 */
     private fun glLoop(s: Session) {
         val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
@@ -408,7 +415,8 @@ class ArCoreManager(
 
         try {
             lastRotation = currentDisplayRotation()
-            s.setDisplayGeometry(lastRotation, PREVIEW_WIDTH, PREVIEW_HEIGHT)
+            val (dispW, dispH) = displaySizeForRotation(lastRotation)
+            s.setDisplayGeometry(lastRotation, dispW, dispH)
             s.setCameraTextureName(textureIds[0])
             s.resume()
         } catch (e: Exception) {
@@ -425,7 +433,8 @@ class ArCoreManager(
                     val rot = currentDisplayRotation()
                     if (rot != lastRotation) {
                         lastRotation = rot
-                        s.setDisplayGeometry(rot, PREVIEW_WIDTH, PREVIEW_HEIGHT)
+                        val (dispW, dispH) = displaySizeForRotation(rot)
+                        s.setDisplayGeometry(rot, dispW, dispH)
                     }
                 }
                 val frame = s.update()
@@ -521,61 +530,68 @@ class ArCoreManager(
     }
 
     // ------------------------------------------------------- 座標変換
-    /** 四元数（x, y, z, w）。Pose 変換を API 依存なく自前で計算するための最小実装。 */
-    private data class Quat(val x: Double, val y: Double, val z: Double, val w: Double) {
-        fun conjugate() = Quat(-x, -y, -z, w)
+    private data class HorizBasis(
+        val fwdX: Double,
+        val fwdZ: Double,
+        val rightX: Double,
+        val rightZ: Double,
+        val leftX: Double,
+        val leftZ: Double
+    )
 
-        operator fun times(o: Quat) = Quat(
-            w * o.x + x * o.w + y * o.z - z * o.y,
-            w * o.y - x * o.z + y * o.w + z * o.x,
-            w * o.z + x * o.y - y * o.x + z * o.w,
-            w * o.w - x * o.x - y * o.y - z * o.z
-        )
-
-        /** ベクトル (vx, vy, vz) をこの四元数で回転する。 */
-        fun rotate(vx: Double, vy: Double, vz: Double): DoubleArray {
-            val tx = 2.0 * (y * vz - z * vy)
-            val ty = 2.0 * (z * vx - x * vz)
-            val tz = 2.0 * (x * vy - y * vx)
-            return doubleArrayOf(
-                vx + w * tx + (y * tz - z * ty),
-                vy + w * ty + (z * tx - x * tz),
-                vz + w * tz + (x * ty - y * tx)
-            )
+    /** Pose から重力整合ワールド水平面 (X, Z) 上の前方・右・左単位ベクトルを求める。 */
+    private fun horizontalBasis(pose: Pose): HorizBasis {
+        val zAxis = pose.zAxis
+        var fx = -zAxis[0].toDouble()
+        var fz = -zAxis[2].toDouble()
+        var len = hypot(fx, fz)
+        if (len < 1e-3) {
+            // 真下・真上近くを向いた場合はカメラ上辺方向 (+Y) の水平成分を使う
+            val yAxis = pose.yAxis
+            fx = yAxis[0].toDouble()
+            fz = yAxis[2].toDouble()
+            len = hypot(fx, fz)
         }
-    }
-
-    private fun quatOf(pose: Pose): Quat {
-        val q = FloatArray(4)
-        pose.getRotationQuaternion(q, 0)
-        return Quat(q[0].toDouble(), q[1].toDouble(), q[2].toDouble(), q[3].toDouble())
-    }
-
-    /** origin を基準にした cam の相対ポーズを SPEC §1 の部屋座標へ変換する。 */
-    private fun relativePose(origin: Pose, cam: Pose): Triple<Double, Double, Double> {
-        val qoInv = quatOf(origin).conjugate()
-        val relQ = qoInv * quatOf(cam)
-        val relT = qoInv.rotate(
-            (cam.tx() - origin.tx()).toDouble(),
-            (cam.ty() - origin.ty()).toDouble(),
-            (cam.tz() - origin.tz()).toDouble()
+        if (len < 1e-4) {
+            fx = 0.0
+            fz = -1.0
+        } else {
+            fx /= len
+            fz /= len
+        }
+        // 右手系ワールド (+Y が鉛直上): forward = (fx, fz) に対して right = (-fz, fx), left = (fz, -fx)
+        return HorizBasis(
+            fwdX = fx,
+            fwdZ = fz,
+            rightX = -fz,
+            rightZ = fx,
+            leftX = fz,
+            leftZ = -fx
         )
-        // カメラ前方 = 回転行列に (0,0,-1) を掛けたもの（第3列の符号反転）
-        val r02 = 2.0 * (relQ.x * relQ.z + relQ.w * relQ.y)
-        val r22 = 1.0 - 2.0 * (relQ.x * relQ.x + relQ.y * relQ.y)
-        val forwardX = -r02
-        val forwardZ = -r22
-        val x = relT[0]
-        val y = -relT[2]
-        val heading = atan2(-forwardZ, forwardX)
+    }
+
+    /**
+     * origin の水平方位を北 (+y / +π/2)、右向きを +x として、cam の位置と方位を
+     * SPEC §1 の部屋座標へ射影する（縦持ち・横持ち・斜め傾けに不変）。
+     */
+    private fun relativePose(origin: Pose, cam: Pose): Triple<Double, Double, Double> {
+        val base = horizontalBasis(origin)
+        val cur = horizontalBasis(cam)
+        val dX = (cam.tx() - origin.tx()).toDouble()
+        val dZ = (cam.tz() - origin.tz()).toDouble()
+        val x = dX * base.rightX + dZ * base.rightZ
+        val y = dX * base.fwdX + dZ * base.fwdZ
+        val fRoomX = cur.fwdX * base.rightX + cur.fwdZ * base.rightZ
+        val fRoomY = cur.fwdX * base.fwdX + cur.fwdZ * base.fwdZ
+        val heading = atan2(fRoomY, fRoomX)
         return Triple(x, y, heading)
     }
 
-    // ------------------------------------------------------- Depth → 21本レイ
+    // ------------------------------------------------------- Depth → 21本レイ（3D 逆射影）
     /**
-     * 深度画像から 21 本レイを作る。新しい深度画像でないフレームでは null を
-     * 返し、配信しない（タイムスタンプ比較が ARCore 公式の判定手順。
-     * スキャンの二重更新を防ぐ）。
+     * 深度画像の各画素を camera.pose を用いて重力整合ワールド空間へ 3D 逆射影し、
+     * 床・天井を高さ・俯角フィルタで除外した上で水平 ±30° の 21 本レイへ集計する。
+     * 新しい深度画像でないフレームでは null を返し、配信しない。
      */
     private fun computeRays(frame: Frame): DoubleArray? {
         val rays = DoubleArray(RAY_COUNT) { -1.0 }
@@ -599,34 +615,90 @@ class ArCoreManager(
             val confRowStride = confPlane.rowStride
             val confPixelStride = confPlane.pixelStride
 
-            // 深度画像の水平画角は機種で違うため、テクスチャ側の内部パラメータを
-            // 深度画像の解像度へ換算してレイ方向→列の対応を作る（SPEC §5.2-3 の近似。
-            // 厳密には機種ごとのキャリブレーションが望ましい）
             val intr = frame.camera.textureIntrinsics
             val texW = intr.imageDimensions[0].toDouble()
-            val fxDepth = intr.focalLength[0].toDouble() * w / texW
-            val cxDepth = intr.principalPoint[0].toDouble() * w / texW
+            val texH = intr.imageDimensions[1].toDouble()
+            if (texW <= 0.0 || texH <= 0.0) return null
+            val fx = intr.focalLength[0].toDouble() * w / texW
+            val fy = intr.focalLength[1].toDouble() * h / texH
+            val cx = intr.principalPoint[0].toDouble() * w / texW
+            val cy = intr.principalPoint[1].toDouble() * h / texH
+            if (fx <= 0.0 || fy <= 0.0) return null
 
-            val rowFrom = (h * 0.40).toInt()
-            val rowTo = (h * 0.60).toInt().coerceAtLeast(rowFrom + 1)
+            val camPose = frame.camera.pose
+            val xAxis = camPose.xAxis
+            val yAxis = camPose.yAxis
+            val zAxis = camPose.zAxis
+            val ax0 = xAxis[0].toDouble()
+            val ax1 = xAxis[1].toDouble()
+            val ax2 = xAxis[2].toDouble()
+            val ay0 = yAxis[0].toDouble()
+            val ay1 = yAxis[1].toDouble()
+            val ay2 = yAxis[2].toDouble()
+            val az0 = zAxis[0].toDouble()
+            val az1 = zAxis[1].toDouble()
+            val az2 = zAxis[2].toDouble()
+
+            val basis = horizontalBasis(camPose)
+            val bins = Array(RAY_COUNT) { ArrayList<Double>() }
+
+            var v = 0
+            while (v < h) {
+                var u = 0
+                while (u < w) {
+                    val dIndex = v * depthRowStride + u * depthPixelStride
+                    if (dIndex + 1 < depthBuffer.limit()) {
+                        val cIndex = v * confRowStride + u * confPixelStride
+                        val confidence =
+                            if (cIndex < confBuffer.limit()) confBuffer.get(cIndex).toInt() and 0xFF else 0
+                        if (confidence >= 100) {
+                            val lo = depthBuffer.get(dIndex).toInt() and 0xFF
+                            val hi = depthBuffer.get(dIndex + 1).toInt() and 0xFF
+                            val mm = lo or (hi shl 8)
+                            if (mm in 150..5000) {
+                                val depthM = mm / 1000.0
+                                val xCam = (u - cx) * depthM / fx
+                                val yCam = (cy - v) * depthM / fy
+                                val zCam = -depthM
+
+                                val wx = ax0 * xCam + ay0 * yCam + az0 * zCam
+                                val wy = ax1 * xCam + ay1 * yCam + az1 * zCam
+                                val wz = ax2 * xCam + ay2 * yCam + az2 * zCam
+
+                                val dForward = wx * basis.fwdX + wz * basis.fwdZ
+                                if (dForward > 0.12) {
+                                    val dLeft = wx * basis.leftX + wz * basis.leftZ
+                                    val horizDist = hypot(dForward, dLeft)
+                                    if (horizDist >= 0.15 &&
+                                        horizDist <= 5.0 &&
+                                        wy >= -0.20 &&
+                                        wy <= 0.50
+                                    ) {
+                                        val elevSlope = wy / horizDist
+                                        if (elevSlope >= -0.15 && elevSlope <= 0.35) {
+                                            val angleDeg = Math.toDegrees(atan2(dLeft, dForward))
+                                            if (angleDeg >= -31.5 && angleDeg <= 31.5) {
+                                                val bin = ((angleDeg + 31.5) / 3.0)
+                                                    .toInt()
+                                                    .coerceIn(0, RAY_COUNT - 1)
+                                                bins[bin].add(horizDist)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    u += 2
+                }
+                v += 2
+            }
+
             for (i in 0 until RAY_COUNT) {
-                // core 側は +angle が反時計回り（左）、-angle が時計回り（右）。
-                // 画像 u 座標は左=0・右=w-1 のため、符号を引いて左右を一致させる
-                // （i=0 が右 -30° で u > cxDepth、i=20 が左 +30° で u < cxDepth）。
-                val angleRad = Math.toRadians(-30.0 + 3.0 * i)
-                var u = (cxDepth - fxDepth * tan(angleRad)).roundToInt()
-                if (u < 0) u = 0
-                if (u > w - 1) u = w - 1
-                val z = sampleRay(
-                    depthBuffer, depthRowStride, depthPixelStride,
-                    confBuffer, confRowStride, confPixelStride,
-                    w, u, rowFrom, rowTo
-                )
-                if (z > 0) {
-                    // ⚠ ARCore の深度値は「光線の実距離」ではなく「光軸への射影
-                    // （z値）」。扇形レイの実距離に直すには 1/cos(θ) の補正が要る
-                    // （ARCore 公式 Depth ガイド。放置すると壁が内側に湾曲する）
-                    rays[i] = z / kotlin.math.cos(angleRad)
+                val samples = bins[i]
+                if (samples.size >= 2) {
+                    samples.sort()
+                    rays[i] = samples[samples.size / 2]
                 }
             }
         } catch (e: NotYetAvailableException) {
@@ -637,57 +709,14 @@ class ArCoreManager(
         } finally {
             try {
                 depthImage?.close()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
             }
             try {
                 confidenceImage?.close()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
             }
         }
         return rays
-    }
-
-    /**
-     * 中央列 u（前後 ±2 列まで広げる）× 中央帯の行について、信頼度が高く
-     * 範囲内（100〜5000mm）の深度値の中央値をメートルで返す。無ければ -1.0。
-     */
-    private fun sampleRay(
-        depthBuffer: java.nio.ByteBuffer,
-        depthRowStride: Int,
-        depthPixelStride: Int,
-        confBuffer: java.nio.ByteBuffer,
-        confRowStride: Int,
-        confPixelStride: Int,
-        imageWidth: Int,
-        centerU: Int,
-        rowFrom: Int,
-        rowTo: Int
-    ): Double {
-        val values = ArrayList<Int>()
-        for (du in -2..2) {
-            val u = centerU + du
-            if (u < 0 || u >= imageWidth) continue
-            var r = rowFrom
-            while (r < rowTo) {
-                val dIndex = r * depthRowStride + u * depthPixelStride
-                if (dIndex + 1 < depthBuffer.limit()) {
-                    val lo = depthBuffer.get(dIndex).toInt() and 0xFF
-                    val hi = depthBuffer.get(dIndex + 1).toInt() and 0xFF
-                    val mm = lo or (hi shl 8)
-                    val cIndex = r * confRowStride + u * confPixelStride
-                    val confidence =
-                        if (cIndex < confBuffer.limit()) confBuffer.get(cIndex).toInt() and 0xFF else 0
-                    // 信頼度 0..255 のうち高信頼（>=128）だけを採用（SPEC §5.2）
-                    if (confidence >= 128 && mm in 100..5000) {
-                        values.add(mm)
-                    }
-                }
-                r += 2 // 行は間引いてサンプル数を抑える
-            }
-        }
-        if (values.isEmpty()) return -1.0
-        values.sort()
-        return values[values.size / 2] / 1000.0
     }
 
     // ------------------------------------------------------- 配信
