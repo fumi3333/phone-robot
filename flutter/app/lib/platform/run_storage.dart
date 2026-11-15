@@ -7,20 +7,102 @@ import 'package:flutter/services.dart';
 import 'package:phone_robot_core/phone_robot_core.dart';
 
 /// 走行軌跡の1点（ARCore グリッド座標）。
-typedef TrajectoryPoint = ({
-  int elapsedMs,
-  double x,
-  double y,
-  double heading,
-});
+typedef TrajectoryPoint = ({int elapsedMs, double x, double y, double heading});
 
-/// 走行終了時（または手動記録停止時）に出力される 4 ファイル一式。
+/// 送信した1つの命令（または同一指令の連続区間）に対する実車・センサー変化の要約。
+class CommandEffectSegment {
+  final int index;
+  final int startElapsedMs;
+  final int endElapsedMs;
+  final int drivePwm;
+  final int steerPwm;
+  final String actionLabel;
+  final double? startX;
+  final double? startY;
+  final double? startHeadingDeg;
+  final double? endX;
+  final double? endY;
+  final double? endHeadingDeg;
+  final double? dxM;
+  final double? dyM;
+  final double? distanceMovedM;
+  final double? dHeadingDeg;
+  final double? startFrontMinM;
+  final double? endFrontMinM;
+  final double? dFrontMinM;
+
+  const CommandEffectSegment({
+    required this.index,
+    required this.startElapsedMs,
+    required this.endElapsedMs,
+    required this.drivePwm,
+    required this.steerPwm,
+    required this.actionLabel,
+    this.startX,
+    this.startY,
+    this.startHeadingDeg,
+    this.endX,
+    this.endY,
+    this.endHeadingDeg,
+    this.dxM,
+    this.dyM,
+    this.distanceMovedM,
+    this.dHeadingDeg,
+    this.startFrontMinM,
+    this.endFrontMinM,
+    this.dFrontMinM,
+  });
+
+  int get durationMs => math.max(0, endElapsedMs - startElapsedMs);
+
+  Map<String, Object?> toJson() => {
+    'index': index,
+    'startElapsedMs': startElapsedMs,
+    'endElapsedMs': endElapsedMs,
+    'durationMs': durationMs,
+    'drivePwm': drivePwm,
+    'steerPwm': steerPwm,
+    'actionLabel': actionLabel,
+    'startX': _roundOpt(startX, 4),
+    'startY': _roundOpt(startY, 4),
+    'startHeadingDeg': _roundOpt(startHeadingDeg, 2),
+    'endX': _roundOpt(endX, 4),
+    'endY': _roundOpt(endY, 4),
+    'endHeadingDeg': _roundOpt(endHeadingDeg, 2),
+    'dxM': _roundOpt(dxM, 4),
+    'dyM': _roundOpt(dyM, 4),
+    'distanceMovedM': _roundOpt(distanceMovedM, 4),
+    'dHeadingDeg': _roundOpt(dHeadingDeg, 2),
+    'startFrontMinM': _roundOpt(startFrontMinM, 3),
+    'endFrontMinM': _roundOpt(endFrontMinM, 3),
+    'dFrontMinM': _roundOpt(dFrontMinM, 3),
+  };
+
+  static double? _roundOpt(double? v, int digits) =>
+      v == null ? null : double.parse(v.toStringAsFixed(digits));
+}
+
+String classifyCommandAction(int drivePwm, int steerPwm) {
+  if (drivePwm == 0 && steerPwm == 0) return '停止';
+  if (drivePwm == 0 && steerPwm < 0) return '先当て左';
+  if (drivePwm == 0 && steerPwm > 0) return '先当て右';
+  if (drivePwm > 0 && steerPwm < 0) return '左旋回';
+  if (drivePwm > 0 && steerPwm > 0) return '右旋回';
+  if (drivePwm > 0) return '前進';
+  if (drivePwm < 0 && steerPwm < 0) return '後退左';
+  if (drivePwm < 0 && steerPwm > 0) return '後退右';
+  return '後退';
+}
+
+/// 走行終了時（または手動記録停止時）に出力される記録ファイル一式。
 class RunBundle {
   final String runId;
   final String mode;
   final DateTime startedAt;
   final DateTime endedAt;
   final String csvContent;
+  final String commandEffectsCsvContent;
+  final List<CommandEffectSegment> commandEffects;
   final String jsonContent;
   final String summaryMarkdown;
   final Uint8List mapPngBytes;
@@ -28,6 +110,7 @@ class RunBundle {
   final int scanCount;
   final double mappedAreaM2;
   final double coverage;
+  final bool hasMp4Video;
 
   const RunBundle({
     required this.runId,
@@ -35,6 +118,8 @@ class RunBundle {
     required this.startedAt,
     required this.endedAt,
     required this.csvContent,
+    required this.commandEffectsCsvContent,
+    required this.commandEffects,
     required this.jsonContent,
     required this.summaryMarkdown,
     required this.mapPngBytes,
@@ -42,15 +127,35 @@ class RunBundle {
     required this.scanCount,
     required this.mappedAreaM2,
     required this.coverage,
+    this.hasMp4Video = false,
   });
 
   /// MethodChannel 経由で Kotlin 側へ渡すファイルマップ。
   Map<String, Object> toChannelFiles() => {
-        'driving_log_$runId.csv': csvContent,
-        'floor_map_$runId.png': mapPngBytes,
-        'floor_map_$runId.json': jsonContent,
-        'run_summary_$runId.md': summaryMarkdown,
-      };
+    'driving_log_$runId.csv': csvContent,
+    'command_effects_$runId.csv': commandEffectsCsvContent,
+    'floor_map_$runId.png': mapPngBytes,
+    'floor_map_$runId.json': jsonContent,
+    'run_summary_$runId.md': summaryMarkdown,
+  };
+}
+
+class _OpenCommandSegment {
+  final int index;
+  final int startElapsedMs;
+  final int drivePwm;
+  final int steerPwm;
+  final Pose? startPose;
+  final double? startFrontMinM;
+
+  _OpenCommandSegment({
+    required this.index,
+    required this.startElapsedMs,
+    required this.drivePwm,
+    required this.steerPwm,
+    required this.startPose,
+    required this.startFrontMinM,
+  });
 }
 
 /// 1回の走行中のコマンド・深度スキャン・軌跡を記録し、[RunBundle] を組み立てる。
@@ -64,6 +169,10 @@ class RunRecorder {
 
   final StringBuffer _csv = StringBuffer();
   final List<TrajectoryPoint> _trajectory = [];
+  final List<CommandEffectSegment> _segments = [];
+  _OpenCommandSegment? _openSegment;
+  Pose? _latestKnownPose;
+  double? _latestKnownFrontMinM;
 
   int _commandCount = 0;
   int _scanCount = 0;
@@ -74,12 +183,9 @@ class RunRecorder {
   double? _lastTrajectoryX;
   double? _lastTrajectoryY;
 
-  RunRecorder({
-    String? runId,
-    required this.mode,
-    DateTime? startedAt,
-  })  : startedAt = startedAt ?? DateTime.now(),
-        runId = runId ?? formatRunId(startedAt ?? DateTime.now()) {
+  RunRecorder({String? runId, required this.mode, DateTime? startedAt})
+    : startedAt = startedAt ?? DateTime.now(),
+      runId = runId ?? formatRunId(startedAt ?? DateTime.now()) {
     _csv.writeln(
       'timestamp_ms,elapsed_ms,event,mode,drive_pwm,steer_pwm,'
       'x_m,y_m,heading_rad,tracking_state,min_depth_m,rays_m',
@@ -96,6 +202,79 @@ class RunRecorder {
   int get commandCount => _commandCount;
   int get scanCount => _scanCount;
   List<TrajectoryPoint> get trajectory => List.unmodifiable(_trajectory);
+  List<CommandEffectSegment> get commandEffects => List.unmodifiable(_segments);
+
+  static double? frontMinDepthM(Scan? scan) {
+    if (scan == null || scan.ranges.isEmpty) return null;
+    final n = scan.ranges.length;
+    final cStart = (n * 0.33).floor();
+    final cEnd = (n * 0.67).ceil().clamp(cStart, n - 1);
+    var minVal = double.infinity;
+    for (var i = cStart; i <= cEnd; i++) {
+      final r = scan.ranges[i];
+      if (r.isFinite && r > 0 && r < minVal) {
+        minVal = r;
+      }
+    }
+    return minVal.isFinite ? minVal : null;
+  }
+
+  static double _wrapDegDiff(double radDiff) {
+    var r = radDiff % (2 * math.pi);
+    if (r > math.pi) r -= 2 * math.pi;
+    if (r <= -math.pi) r += 2 * math.pi;
+    return r * 180.0 / math.pi;
+  }
+
+  static double _wrapDeg(double rad) => _wrapDegDiff(rad);
+
+  void _closeOpenSegment(
+    int endElapsedMs,
+    Pose? endPose,
+    double? endFrontMinM,
+  ) {
+    final seg = _openSegment;
+    if (seg == null) return;
+    _openSegment = null;
+    final sp = seg.startPose;
+    final ep = endPose ?? sp;
+    final sf = seg.startFrontMinM;
+    final ef = endFrontMinM ?? sf;
+
+    final double? dxM = (sp != null && ep != null) ? ep.x - sp.x : null;
+    final double? dyM = (sp != null && ep != null) ? ep.y - sp.y : null;
+    final double? distM = (dxM != null && dyM != null)
+        ? math.sqrt(dxM * dxM + dyM * dyM)
+        : null;
+    final double? dHeadingDeg = (sp != null && ep != null)
+        ? _wrapDegDiff(ep.heading - sp.heading)
+        : null;
+    final double? dFrontM = (sf != null && ef != null) ? ef - sf : null;
+
+    _segments.add(
+      CommandEffectSegment(
+        index: seg.index,
+        startElapsedMs: seg.startElapsedMs,
+        endElapsedMs: math.max(seg.startElapsedMs, endElapsedMs),
+        drivePwm: seg.drivePwm,
+        steerPwm: seg.steerPwm,
+        actionLabel: classifyCommandAction(seg.drivePwm, seg.steerPwm),
+        startX: sp?.x,
+        startY: sp?.y,
+        startHeadingDeg: sp == null ? null : _wrapDeg(sp.heading),
+        endX: ep?.x,
+        endY: ep?.y,
+        endHeadingDeg: ep == null ? null : _wrapDeg(ep.heading),
+        dxM: dxM,
+        dyM: dyM,
+        distanceMovedM: distM,
+        dHeadingDeg: dHeadingDeg,
+        startFrontMinM: sf,
+        endFrontMinM: ef,
+        dFrontMinM: dFrontM,
+      ),
+    );
+  }
 
   void recordCommand(
     int drivePwm,
@@ -107,10 +286,33 @@ class RunRecorder {
   }) {
     _lastDrivePwm = drivePwm;
     _lastSteerPwm = steerPwm;
-    if (rowCount >= maxRows) return;
 
     final now = at ?? DateTime.now();
     final elapsedMs = now.difference(startedAt).inMilliseconds;
+    final effPose = pose ?? latestScan?.pose ?? _latestKnownPose;
+    final effFrontMin = frontMinDepthM(latestScan) ?? _latestKnownFrontMinM;
+    if (effPose != null) _latestKnownPose = effPose;
+    if (effFrontMin != null) _latestKnownFrontMinM = effFrontMin;
+
+    final open = _openSegment;
+    if (open == null ||
+        open.drivePwm != drivePwm ||
+        open.steerPwm != steerPwm) {
+      if (open != null) {
+        _closeOpenSegment(elapsedMs, effPose, effFrontMin);
+      }
+      _openSegment = _OpenCommandSegment(
+        index: _segments.length + 1,
+        startElapsedMs: elapsedMs,
+        drivePwm: drivePwm,
+        steerPwm: steerPwm,
+        startPose: effPose,
+        startFrontMinM: effFrontMin,
+      );
+    }
+
+    if (rowCount >= maxRows) return;
+
     _appendRow(
       timestampMs: now.millisecondsSinceEpoch,
       elapsedMs: elapsedMs,
@@ -127,13 +329,12 @@ class RunRecorder {
     }
   }
 
-  void recordScan(
-    Scan scan, {
-    required String trackingState,
-    DateTime? at,
-  }) {
+  void recordScan(Scan scan, {required String trackingState, DateTime? at}) {
     final now = at ?? DateTime.now();
     final elapsedMs = now.difference(startedAt).inMilliseconds;
+    _latestKnownPose = scan.pose;
+    final fMin = frontMinDepthM(scan);
+    if (fMin != null) _latestKnownFrontMinM = fMin;
     _maybeAddTrajectoryPoint(elapsedMs, scan.pose);
 
     if (rowCount >= maxRows) return;
@@ -168,7 +369,8 @@ class RunRecorder {
       _lastTrajectoryMs = elapsedMs;
       return;
     }
-    final distSq = (pose.x - lx) * (pose.x - lx) + (pose.y - ly) * (pose.y - ly);
+    final distSq =
+        (pose.x - lx) * (pose.x - lx) + (pose.y - ly) * (pose.y - ly);
     if (distSq >= 0.03 * 0.03 || elapsedMs - _lastTrajectoryMs >= 500) {
       _trajectory.add((
         elapsedMs: elapsedMs,
@@ -230,6 +432,34 @@ class RunRecorder {
     return '"$escaped"';
   }
 
+  static String _fmtOpt(double? v, int digits) =>
+      v == null ? '' : v.toStringAsFixed(digits);
+
+  static String _buildCommandEffectsCsv(List<CommandEffectSegment> segments) {
+    final buf = StringBuffer()
+      ..writeln(
+        'index,start_elapsed_ms,end_elapsed_ms,duration_ms,'
+        'drive_pwm,steer_pwm,action_label,'
+        'start_x_m,start_y_m,start_heading_deg,'
+        'end_x_m,end_y_m,end_heading_deg,'
+        'dx_m,dy_m,distance_moved_m,d_heading_deg,'
+        'start_front_min_m,end_front_min_m,d_front_min_m',
+      );
+    for (final s in segments) {
+      buf.writeln(
+        '${s.index},${s.startElapsedMs},${s.endElapsedMs},${s.durationMs},'
+        '${s.drivePwm},${s.steerPwm},${_csvCell(s.actionLabel)},'
+        '${_fmtOpt(s.startX, 4)},${_fmtOpt(s.startY, 4)},${_fmtOpt(s.startHeadingDeg, 2)},'
+        '${_fmtOpt(s.endX, 4)},${_fmtOpt(s.endY, 4)},${_fmtOpt(s.endHeadingDeg, 2)},'
+        '${_fmtOpt(s.dxM, 4)},${_fmtOpt(s.dyM, 4)},${_fmtOpt(s.distanceMovedM, 4)},'
+        '${_fmtOpt(s.dHeadingDeg, 2)},'
+        '${_fmtOpt(s.startFrontMinM, 3)},${_fmtOpt(s.endFrontMinM, 3)},'
+        '${_fmtOpt(s.dFrontMinM, 3)}',
+      );
+    }
+    return buf.toString();
+  }
+
   RunBundle buildBundle({
     required OccupancyGrid grid,
     required MappingParams params,
@@ -237,10 +467,22 @@ class RunRecorder {
     required int currentDrivePwm,
     required bool invertSteer,
     Cell? robotCell,
+    Pose? latestPose,
+    Scan? latestScan,
+    bool hasMp4Video = false,
     DateTime? endedAt,
   }) {
     final end = endedAt ?? DateTime.now();
-    final durationSec = math.max(0.0, end.difference(startedAt).inMilliseconds / 1000.0);
+    final endElapsedMs = math.max(0, end.difference(startedAt).inMilliseconds);
+    final closingPose = latestPose ?? latestScan?.pose ?? _latestKnownPose;
+    final closingFrontMin = frontMinDepthM(latestScan) ?? _latestKnownFrontMinM;
+    if (_openSegment != null) {
+      _closeOpenSegment(endElapsedMs, closingPose, closingFrontMin);
+    }
+    final segments = List<CommandEffectSegment>.unmodifiable(_segments);
+    final effectsCsv = _buildCommandEffectsCsv(segments);
+
+    final durationSec = math.max(0.0, endElapsedMs / 1000.0);
     final mappedAreaM2 = grid.knownCount * params.cellSize * params.cellSize;
     final coverage = grid.coverage;
 
@@ -257,6 +499,7 @@ class RunRecorder {
       'startedAt': startedAt.toIso8601String(),
       'endedAt': end.toIso8601String(),
       'durationSec': double.parse(durationSec.toStringAsFixed(2)),
+      'hasMp4Video': hasMp4Video,
       'mappingParams': {
         'cellSizeM': params.cellSize,
         'gridW': params.gridW,
@@ -274,6 +517,7 @@ class RunRecorder {
         'coverage': double.parse(coverage.toStringAsFixed(4)),
         'knownCount': grid.knownCount,
         'commandCount': _commandCount,
+        'commandSegmentCount': segments.length,
         'scanCount': _scanCount,
       },
       'trajectory': [
@@ -285,6 +529,7 @@ class RunRecorder {
             'heading': double.parse(pt.heading.toStringAsFixed(4)),
           },
       ],
+      'commandEffects': [for (final seg in segments) seg.toJson()],
       'logOdds': [
         for (final v in grid.logOdds) double.parse(v.toStringAsFixed(3)),
       ],
@@ -296,22 +541,65 @@ class RunRecorder {
       ..writeln('- 走行ID: $runId')
       ..writeln('- 走行モード: $mode')
       ..writeln('- 開始時刻: ${startedAt.toIso8601String()}')
-      ..writeln('- 終了時刻: ${end.toIso8601String()}（${durationSec.toStringAsFixed(1)} 秒）')
-      ..writeln('- 対象スケール: ${params.roomW.toStringAsFixed(1)} m × '
-          '${params.roomH.toStringAsFixed(1)} m'
-          '（グリッド ${params.gridW}×${params.gridH}、セル '
-          '${(params.cellSize * 100).round()} cm）')
-      ..writeln('- マッピング面積: ${mappedAreaM2.toStringAsFixed(2)} m²'
-          '（カバー率 ${(coverage * 100).toStringAsFixed(1)}%）')
-      ..writeln('- 記録件数: コマンド $_commandCount 件 / 深度スキャン $_scanCount 件 / '
-          '軌跡 ${_trajectory.length} 点')
-      ..writeln('- 走行設定: 速度 ${(speedNorm * 100).round()}% '
-          '(PWM $currentDrivePwm), 操舵反転 ${invertSteer ? 'ON' : 'OFF'}')
+      ..writeln(
+        '- 終了時刻: ${end.toIso8601String()}（${durationSec.toStringAsFixed(1)} 秒）',
+      )
+      ..writeln(
+        '- 対象スケール: ${params.roomW.toStringAsFixed(1)} m × '
+        '${params.roomH.toStringAsFixed(1)} m'
+        '（グリッド ${params.gridW}×${params.gridH}、セル '
+        '${(params.cellSize * 100).round()} cm）',
+      )
+      ..writeln(
+        '- マッピング面積: ${mappedAreaM2.toStringAsFixed(2)} m²'
+        '（カバー率 ${(coverage * 100).toStringAsFixed(1)}%）',
+      )
+      ..writeln(
+        '- 記録件数: コマンド $_commandCount 件（命令区間 ${segments.length} 件） / '
+        '深度スキャン $_scanCount 件 / 軌跡 ${_trajectory.length} 点',
+      )
+      ..writeln(
+        '- 走行設定: 速度 ${(speedNorm * 100).round()}% '
+        '(PWM $currentDrivePwm), 操舵反転 ${invertSteer ? 'ON' : 'OFF'}',
+      )
+      ..writeln(
+        '- カメラMP4録画: ${hasMp4Video ? 'camera_recording_$runId.mp4 保存済み' : 'なし'}',
+      )
       ..writeln()
       ..writeln('## 出力ファイル')
       ..writeln('- `driving_log_$runId.csv`: 時系列操作コマンド・ARCore自己位置・21本深度レイ')
+      ..writeln('- `command_effects_$runId.csv`: 命令送信ごとの位置・向き・前方距離の変化一覧')
       ..writeln('- `floor_map_$runId.png`: 占有格子地図と走行軌跡画像')
-      ..writeln('- `floor_map_$runId.json`: グリッド数値データ（logOdds配列）および軌跡JSON');
+      ..writeln('- `floor_map_$runId.json`: グリッド数値データ・軌跡・命令効果JSON');
+
+    if (hasMp4Video) {
+      md.writeln('- `camera_recording_$runId.mp4`: ARCore カメラ映像＋センサー動画');
+    }
+    if (segments.isNotEmpty) {
+      md
+        ..writeln()
+        ..writeln('## コマンド別の車体・センサー変化一覧（命令→結果）')
+        ..writeln()
+        ..writeln(
+          '| # | 時間 [ms] | 操作 | PWM (駆動,操舵) | 移動距離 [m] | 向き変化 [°] | 前方距離変化 [m] |',
+        )
+        ..writeln('|---:|---:|---|---|---:|---:|---:|');
+      for (final s in segments) {
+        final mv = s.distanceMovedM == null
+            ? '—'
+            : s.distanceMovedM!.toStringAsFixed(2);
+        final dh = s.dHeadingDeg == null
+            ? '—'
+            : s.dHeadingDeg!.toStringAsFixed(1);
+        final df = s.dFrontMinM == null
+            ? '—'
+            : s.dFrontMinM!.toStringAsFixed(2);
+        md.writeln(
+          '| ${s.index} | ${s.durationMs} | ${s.actionLabel} | '
+          '(${s.drivePwm}, ${s.steerPwm}) | $mv | $dh | $df |',
+        );
+      }
+    }
 
     return RunBundle(
       runId: runId,
@@ -319,6 +607,8 @@ class RunRecorder {
       startedAt: startedAt,
       endedAt: end,
       csvContent: _csv.toString(),
+      commandEffectsCsvContent: effectsCsv,
+      commandEffects: segments,
       jsonContent: jsonEncode(jsonPayload),
       summaryMarkdown: md.toString(),
       mapPngBytes: mapPngBytes,
@@ -326,6 +616,7 @@ class RunRecorder {
       scanCount: _scanCount,
       mappedAreaM2: mappedAreaM2,
       coverage: coverage,
+      hasMp4Video: hasMp4Video,
     );
   }
 }
@@ -376,10 +667,7 @@ Uint8List encodeOccupancyGridPng({
     for (final pt in trajectory) {
       final cur = cellOf(params, pt.x, pt.y);
       if (prev != null) {
-        final steps = math.max(
-          (cur.r - prev.r).abs(),
-          (cur.c - prev.c).abs(),
-        );
+        final steps = math.max((cur.r - prev.r).abs(), (cur.c - prev.c).abs());
         if (steps > 1) {
           for (var s = 1; s < steps; s++) {
             final t = s / steps;
@@ -401,7 +689,8 @@ Uint8List encodeOccupancyGridPng({
     }
   }
 
-  final endCell = robotCell ??
+  final endCell =
+      robotCell ??
       (trajectory.isNotEmpty
           ? cellOf(params, trajectory.last.x, trajectory.last.y)
           : null);
@@ -515,15 +804,13 @@ class MethodChannelRunStorage implements RunStorage {
     required bool openDriveSheet,
   }) async {
     try {
-      final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
-        'saveRunBundle',
-        {
-          'runId': bundle.runId,
-          'files': bundle.toChannelFiles(),
-          'autoDriveSync': autoDriveSync,
-          'openDriveSheet': openDriveSheet,
-        },
-      );
+      final raw = await _channel
+          .invokeMethod<Map<dynamic, dynamic>>('saveRunBundle', {
+            'runId': bundle.runId,
+            'files': bundle.toChannelFiles(),
+            'autoDriveSync': autoDriveSync,
+            'openDriveSheet': openDriveSheet,
+          });
       if (raw == null) {
         return const SaveRunResult(
           savedDir: '',
@@ -548,10 +835,9 @@ class MethodChannelRunStorage implements RunStorage {
   @override
   Future<bool> shareRunToDrive({String? runId}) async {
     try {
-      final ok = await _channel.invokeMethod<bool>(
-        'shareRunToDrive',
-        {'runId': runId},
-      );
+      final ok = await _channel.invokeMethod<bool>('shareRunToDrive', {
+        'runId': runId,
+      });
       return ok ?? false;
     } on MissingPluginException {
       return false;
@@ -571,10 +857,9 @@ class MethodChannelRunStorage implements RunStorage {
   @override
   Future<bool> setWebhookUrl(String url) async {
     try {
-      final ok = await _channel.invokeMethod<bool>(
-        'setWebhookUrl',
-        {'url': url},
-      );
+      final ok = await _channel.invokeMethod<bool>('setWebhookUrl', {
+        'url': url,
+      });
       return ok ?? false;
     } on MissingPluginException {
       return false;

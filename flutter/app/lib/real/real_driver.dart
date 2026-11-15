@@ -139,7 +139,6 @@ class RealDriver {
   bool _aborted = false;
   bool _busy = false;
   int _appliedSeq = 0;
-  int _steerPulseTick = 0;
   double _lastScanX = 0;
   double _lastScanY = 0;
   double _lastScanHeading = 0;
@@ -348,29 +347,20 @@ class RealDriver {
     );
   }
 
-  /// Jozen 86 のバンバン操舵＋スリップクラッチ向け「パルス当て舵」計算。
-  /// - |err| < 0.09 rad (約5°): 不感帯で直進維持 (0.0)
-  /// - 0.09 <= |err| < 0.38 rad: 100ms 周期で ON/OFF を交互に出力
-  /// - |err| >= 0.38 rad: 連続フルステア (±1.0)
+  /// Jozen 86 のバネ戻し付きバンバン操舵向け連続フルステア計算。
+  /// 奇数ティックで 0 に落とすとバネで直進に戻ってしまうため、
+  /// 不感帯（±0.09 rad ≈ 5°）の外では目標方向のフルステア（±1.0）を維持する。
   double _computePulseSteer(double err) {
     final absErr = err.abs();
     if (absErr < 0.09) {
-      _steerPulseTick = 0;
       return 0.0;
     }
-    final dir = err > 0 ? 1.0 : -1.0;
-    if (absErr >= 0.38) {
-      return dir;
-    }
-    final pulseOn = (_steerPulseTick % 2) == 0;
-    _steerPulseTick++;
-    return pulseOn ? dir : 0.0;
+    return err > 0 ? 1.0 : -1.0;
   }
 
   /// ゲートの結果を回転動作の可否に読み替える。
   /// null / replan（復帰した）なら続行、それ以外は失敗として止める。
-  bool _gateBlocks(DriveOutcome? g) =>
-      g != null && g != DriveOutcome.replan;
+  bool _gateBlocks(DriveOutcome? g) => g != null && g != DriveOutcome.replan;
 
   /// その場向き変え。車両はステアリング式のため、転がしながら ARCore の
   /// 向きが目標に近づくまで操舵する（SPEC §7 の読み替え）。
@@ -515,7 +505,7 @@ class RealDriver {
       hudTargetDistM = dist;
       final steer = _computePulseSteer(err);
       var drive = dist < 0.18 ? math.min(cruiseDrive, 0.40) : cruiseDrive;
-      if (err.abs() >= 0.38) drive = math.min(drive, 0.45);
+      if (steer.abs() > 0.5) drive = math.min(drive, 0.38);
       if (!await _sendNorm(drive, steer)) {
         // 送信失敗 = リンクが死んでいる（R3）。障害物として扱わない。
         lastStopReason = 'link-lost';
@@ -580,9 +570,11 @@ class RealDriver {
           break;
         }
         fronts.sort((a, b) {
-          final da = (a.r - robot.r) * (a.r - robot.r) +
+          final da =
+              (a.r - robot.r) * (a.r - robot.r) +
               (a.c - robot.c) * (a.c - robot.c);
-          final db = (b.r - robot.r) * (b.r - robot.r) +
+          final db =
+              (b.r - robot.r) * (b.r - robot.r) +
               (b.c - robot.c) * (b.c - robot.c);
           return da.compareTo(db);
         });
@@ -729,13 +721,13 @@ class RealDriver {
     var lengthM = 0.0;
 
     GoToResult fail(String reason) => GoToResult(
-          success: false,
-          steps: steps,
-          pathLengthM: lengthM,
-          replans: replans,
-          failureReason: reason,
-          traversed: traversed,
-        );
+      success: false,
+      steps: steps,
+      pathLengthM: lengthM,
+      replans: replans,
+      failureReason: reason,
+      traversed: traversed,
+    );
 
     try {
       if (!grid.inBounds(goal.r, goal.c)) return fail('goal-out-of-bounds');
@@ -979,9 +971,11 @@ class RealDriver {
           var sum = 0.0;
           var count = 0;
           var minWin = double.infinity;
-          for (var j = math.max(0, i - 1);
-              j <= math.min(nRays - 1, i + 1);
-              j++) {
+          for (
+            var j = math.max(0, i - 1);
+            j <= math.min(nRays - 1, i + 1);
+            j++
+          ) {
             final d = rayDist(j);
             sum += d;
             if (d < minWin) minWin = d;
@@ -989,8 +983,9 @@ class RealDriver {
           }
           final avg = sum / count;
           final angleWeight = 1.0 - 0.12 * (offsets[i].abs() / halfFov);
-          final measuredBonus =
-              (scan.ranges[i].isFinite && scan.ranges[i] > 0) ? 0.30 : 0.0;
+          final measuredBonus = (scan.ranges[i].isFinite && scan.ranges[i] > 0)
+              ? 0.30
+              : 0.0;
 
           final double score;
           if (minWin < 0.32) {
@@ -1010,16 +1005,19 @@ class RealDriver {
                 probeUnknown++;
               }
             }
-            final unknownRatio =
-                probeTotal > 0 ? probeUnknown / probeTotal : 0.0;
+            final unknownRatio = probeTotal > 0
+                ? probeUnknown / probeTotal
+                : 0.0;
             final frontierBonus = frontierBearing == null
                 ? 0.0
                 : 0.4 *
-                    math.max(
-                      0.0,
-                      1.0 - _normAngle(frontierBearing - ang).abs() / p.fovRad,
-                    );
-            score = avg * angleWeight +
+                      math.max(
+                        0.0,
+                        1.0 -
+                            _normAngle(frontierBearing - ang).abs() / p.fovRad,
+                      );
+            score =
+                avg * angleWeight +
                 measuredBonus +
                 0.6 * unknownRatio +
                 frontierBonus;
@@ -1038,9 +1036,10 @@ class RealDriver {
         final err = _normAngle(targetHeading - pose.heading);
         final steer = _computePulseSteer(err);
         final frontClear = centerMin ?? targetDist;
-        var drive =
-            frontClear < 0.65 ? math.min(cruiseDrive, 0.40) : cruiseDrive;
-        if (err.abs() >= 0.38) drive = math.min(drive, 0.45);
+        var drive = frontClear < 0.65
+            ? math.min(cruiseDrive, 0.40)
+            : cruiseDrive;
+        if (steer.abs() > 0.5) drive = math.min(drive, 0.38);
 
         if (!await _sendNorm(drive, steer)) {
           lastStopReason = 'link-lost';

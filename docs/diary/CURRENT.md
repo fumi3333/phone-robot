@@ -14,7 +14,7 @@
 ## リポジトリと公開の状態
 
 - GitHub: https://github.com/fumi3333/phone-robot （public、MIT）
-- リリース v0.2.0 公開済み（APK 約40MB）。GitHub Pages の Web 版 HUD が稼働中: https://fumi3333.github.io/phone-robot/
+- リリース v0.4.0 を準備・公開中（APK 名にバージョン付与対応済み `phone-robot-app-vX.Y.Z.apk`）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
 - Zenn 記事3本を公開済み。記事3は Zennfes Autumn 2026「物理デバイスを使った開発」に応募済み（締切 2026-12-16）。
 
 ## ハードの状態（2026-11-15 時点）
@@ -55,24 +55,23 @@
 - タップで行先指定 5/5。巡回キット（帰還、経路の保存と再生、立入禁止、変化検出は深度レイ比較、Markdown レポート）をシミュレーションで確認。
 - Kotlin: ArCoreManager（自己位置、Raw Depth から21本のレイ、信頼度128以上、1/cos 補正）、SerialManager（usb-serial-for-android、CH340 対応）。安全側の直し R1〜R4 実装済み。
 - 2026-11-15 夜に実機検証結果とコード監査に基づき、Flutter / Kotlin 側 6 箇所を改修済み（`ArCoreManager.kt` の深度左右反転修正、`SerialManager.kt` の DTR/RTS 初期化、`serial_link.dart` の 255 スケール化＋静止摩擦補正 `driveOf` (140..255)＋状態同期、`real_session.dart` の原点中央オフセット＋`floorParams` 24×24m＋`mappedAreaM2`＋`autoSetup()`＋`runAutoCruise()`、`real_driver.dart` のパルス当て舵＋切り返し K-turn＋`explore(initialSpin: false)`＋未探索・フロンティア誘導 VFH フロアマップ作成 `cruiseVfh()`、`map_painter.dart` / `real_page.dart` / `main.dart` の深度・VFH HUD オーバーレイ＋スケール切替＋長押しジョグ＋USB 自動実機切替）。
-- 2026-11-16 未明に追加改修済み:
-  - 並走・微調整向けの速度スライダー（`speedNorm` 10%..100% / 実送信 `PWM 152..255`、自律走行・手動ジョグ双方に即時反映）と「操舵反転（`invertSteer`）」トグルを `real_driver.dart` / `real_session.dart` / `real_page.dart` に実装。
-  - UI の装飾を削減（無彩色ベースの平文表示、`SegmentedButton` のアイコン除去、二重 `AppBar` 整理、角丸チップや装飾文言の削減）し、`real_page.dart` と `sim_page.dart` を横向き（ランドスケープ）2ペイン（左: マップ、右: 状態＋操作パネル）対応にした。
-  - 走行記録＋Google ドライブ連携を実装（`run_storage.dart` + `LogStorageManager.kt` + `scripts/google_drive_webhook.gs`）。自律走行および手動記録で4ファイル一式（`driving_log_<id>.csv` / `floor_map_<id>.png` / `floor_map_<id>.json` / `run_summary_<id>.md`）を生成し、端末内のアプリ領域および `Download/PhoneRobot/` へ自動保存するとともに、Google ドライブアプリ直接共有または GAS Webhook URL によるバックグラウンド自動転送を選べるようにした。`.github/workflows/build_apk.yml` に `flutter test` 実行と `v0.3.0` リリース定義も追加済み。
+- 2026-11-16 v0.4.0 問題を分割して抜本改修済み:
+  - 起動直後からシミュレーションタブを外し、`RealPage` 上部で「① 歩いてマップ測定（手持ち・ESP32 なし）」と「② ラジコン操縦（前後左右ボタン／フリック切替）」に分割。詳細設定と自律走行テストは「⚙ 設定」モーダルへ格納。
+  - バッテリー激減・ラグ解消: `ArCoreManager.kt` の `glLoop` にカメラ新規フレーム判定スリープと 30Hz 上限・ポーズ配信 30Hz 上限を追加し、`RealSession._notify` を 40ms に短縮、`MapPainter` を自分中心ズーム（1m/2m リング＋赤色障害物）＋行バッチ描画へ刷新。
+  - カメラライブ映像（`TextureRegistry` + `PreviewBlitter`）と ARCore MP4 同時録画（`RecordingConfig`）、前方障害物アラートバナー、コマンド送信ごとの変化量データ（`command_effects_<id>.csv` / JSON `commandEffects` / MD 表）を実装。停止時に勝手にドライブへ飛ばず「ドライブへ送る」で送信する運用に変更。
+  - 旋回強化: 手動旋回 `jog('l'/'r')` に 150ms 先当て舵（`c,0,±255`→`152..178` 旋回）を実装し、`RealDriver` の操舵パルスゼロ落ちを廃止。
 - 実機リスクの一覧は docs/note10plus-risks.md。R5（深度の視野角が近似値）は自宅で 1m 実測の較正が必要。
 
 ## 未確認のこと
 
-- 更新版 Flutter アプリの CI (`flutter test` / APK ビルド) と Galaxy Note 10+ での実走確認（ローカルに Flutter SDK 未導入のため未ビルド）。
+- v0.4.0 の GitHub Actions (`flutter test` / Release APK ビルド) および Galaxy Note 10+ 実機でのカメラプレビュー・MP4録画・手持ちスキャン・ラジコン旋回確認（ローカルに Flutter SDK 未導入のため CI でテスト・ビルド後に実機確認）。
 - 実走時の静止摩擦最小 PWM（暫定 `minEffectiveDrivePwm = 140`）と電池電圧低下時の追従性。
-- スマホマウント: 本人の暫定案は「Note 10+ の購入時の化粧箱に横向きで収め、車体上面に輪ゴムで固定する」方式。カメラ＋ToF と右側面 USB-C ポートの干渉回避、箱・輪ゴムの電源/音量ボタン干渉回避、前輪ボンネットが深度中央帯に映り込まない高さ・角度合わせと R5 較正を実機で要確認。
-- アプリのシミュレーション機能を消すかどうか（本人の発言の解釈が割れて未決定。現状は USB 未接続時はシミュレーション、USB 接続時は自動で実機モードを開く形に両立）。
 - 買ったはんだごて本体と台の型番。
 
 ## 次の一手
 
-1. 更新版 Flutter アプリをビルド（GitHub Actions または Flutter 環境）し、Note 10+ へインストールする。
-2. Note 10+ を購入時化粧箱＋輪ゴムで車体へ横向き固定し（カメラ・ToF・USB-C 干渉および側面ボタン押し込み、ボンネット映り込みに注意）、車体と USB 接続して自動実機モード切替・長押しジョグ・操舵反転（必要時）・深度 HUD 扇形レイの左右一致を確認する。
-3. 速度スライダーを低速（20〜40% 付近）にして歩きながら並走しつつ、R5（壁面 1m の実測深度）較正と部屋スケール（6×5m）での「マップ作成（VFH）」実走テストを行う。
-4. 廊下／フロア 24×24m スケールでマップ作成を試す。
+1. v0.4.0 を GitHub Actions でテスト・APK ビルドし、Note 10+ へ `phone-robot-app-v0.4.0.apk` をインストールする。
+2. まず車に載せず「① 歩いてマップ測定」モードで家の中を車目線高さでゆっくり歩き、カメラ映像・障害物アラート・自分中心マップの直感性、電池消費とラグの解消、MP4＋マップ＋ログの Google ドライブ保存を確認する。
+3. 次に車単体テストとして「② ラジコン操縦」モードで USB 接続し、ボタン／フリック切替で「前・後・左（先当て舵）・右（先当て舵）」が狙い通り曲がることと、`command_effects_<id>.csv` に命令と結果が記録されることを確認する。
+4. ① と ② の単体確認が終わってから、「⚙ 設定」内の自律走行（VFH/A*）テストへ進む。
 5. 浦木先生への進捗報告（槌屋相談と進め方を含む。公認サークルの活動費で部品を買えるかの質問も同封）。

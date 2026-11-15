@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
@@ -16,17 +17,20 @@ void main() {
   const serialChannel = MethodChannel('phone_robot/serial');
   const systemChannel = MethodChannel('phone_robot/system');
   const storageChannel = MethodChannel('phone_robot/storage');
+  const arcoreChannel = MethodChannel('phone_robot/arcore');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   final serialCalls = <MethodCall>[];
   final systemCalls = <MethodCall>[];
   final storageCalls = <MethodCall>[];
+  final arcoreCalls = <MethodCall>[];
 
   setUp(() {
     serialCalls.clear();
     systemCalls.clear();
     storageCalls.clear();
+    arcoreCalls.clear();
     messenger.setMockMethodCallHandler(serialChannel, (call) async {
       serialCalls.add(call);
       return true;
@@ -35,12 +39,28 @@ void main() {
       systemCalls.add(call);
       return null;
     });
+    messenger.setMockMethodCallHandler(arcoreChannel, (call) async {
+      arcoreCalls.add(call);
+      if (call.method == 'startMp4Recording') {
+        final runId = (call.arguments as Map<dynamic, dynamic>)['runId'];
+        return '/sdcard/Android/data/test/files/runs/run_$runId/camera_recording_$runId.mp4';
+      }
+      if (call.method == 'stopMp4Recording') {
+        return '/sdcard/Android/data/test/files/runs/run_test/camera_recording_test.mp4';
+      }
+      if (call.method == 'getCameraTextureId') {
+        return 42;
+      }
+      return null;
+    });
     messenger.setMockMethodCallHandler(storageChannel, (call) async {
       storageCalls.add(call);
       if (call.method == 'saveRunBundle') {
+        final args = call.arguments as Map<dynamic, dynamic>;
+        final openSheet = args['openDriveSheet'] == true;
         return {
           'savedDir': '/sdcard/Android/data/test/files/runs/run_test',
-          'driveAction': 'intent_opened',
+          'driveAction': openSheet ? 'intent_opened' : 'local_only',
           'ok': true,
         };
       }
@@ -55,14 +75,16 @@ void main() {
     messenger.setMockMethodCallHandler(serialChannel, null);
     messenger.setMockMethodCallHandler(systemChannel, null);
     messenger.setMockMethodCallHandler(storageChannel, null);
+    messenger.setMockMethodCallHandler(arcoreChannel, null);
   });
 
   test('R4: ポーズ無音を検出して stall 扱いにし、停止指令を送る', () async {
     final session = RealSession();
     session.sensorsOn = true;
     session.poseFeed.addPose(Pose(1.0, 1.0, 0));
-    session.poseFeed.lastPoseAt =
-        DateTime.now().subtract(const Duration(seconds: 10));
+    session.poseFeed.lastPoseAt = DateTime.now().subtract(
+      const Duration(seconds: 10),
+    );
 
     session.evaluateSensorHealth();
 
@@ -72,9 +94,11 @@ void main() {
     // ドライバ停止 → 's' がシリアルへ送られる
     await Future<void>.delayed(const Duration(milliseconds: 100));
     expect(
-      serialCalls.any((c) =>
-          c.method == 'send' &&
-          (c.arguments as Map<dynamic, dynamic>)['text'] == 's'),
+      serialCalls.any(
+        (c) =>
+            c.method == 'send' &&
+            (c.arguments as Map<dynamic, dynamic>)['text'] == 's',
+      ),
       isTrue,
     );
 
@@ -113,13 +137,17 @@ void main() {
     await KeepAwake.setEnabled(true);
     expect(systemCalls, hasLength(1));
     expect(systemCalls.single.method, 'setKeepScreenOn');
-    expect((systemCalls.single.arguments as Map<dynamic, dynamic>)['on'],
-        isTrue);
+    expect(
+      (systemCalls.single.arguments as Map<dynamic, dynamic>)['on'],
+      isTrue,
+    );
 
     await KeepAwake.setEnabled(false);
     expect(systemCalls, hasLength(2));
-    expect((systemCalls.last.arguments as Map<dynamic, dynamic>)['on'],
-        isFalse);
+    expect(
+      (systemCalls.last.arguments as Map<dynamic, dynamic>)['on'],
+      isFalse,
+    );
   });
 
   test('原点オフセット: ARCore (0, 0) をグリッド中央へ変換する', () {
@@ -141,13 +169,14 @@ void main() {
     floorSession.dispose();
   });
 
-  test('速度スライダー設定と操舵反転がジョグ指令の PWM と極性に反映される', () async {
+  test('速度スライダー・先当て舵・旋回PWM上限・操舵反転がジョグ指令に反映される', () async {
     final session = RealSession();
+    List<String> sentList() => serialCalls
+        .where((c) => c.method == 'send')
+        .map((c) => (c.arguments as Map<dynamic, dynamic>)['text'] as String)
+        .toList();
     String? sentText() {
-      final sent = serialCalls
-          .where((c) => c.method == 'send')
-          .map((c) => (c.arguments as Map<dynamic, dynamic>)['text'] as String)
-          .toList();
+      final sent = sentList();
       return sent.isEmpty ? null : sent.last;
     }
 
@@ -162,13 +191,21 @@ void main() {
     await session.jog('f');
     expect(sentText(), 'c,255,0\n');
 
+    // 左旋回はまず駆動0で先当て舵 (-255) し、その後 turnPwm 上限 178 で曲がる
+    final beforeLeft = sentList().length;
     await session.jog('l');
-    expect(sentText(), 'c,255,-255\n');
+    final leftSeq = sentList().sublist(beforeLeft);
+    expect(leftSeq, ['c,0,-255\n', 'c,178,-255\n']);
+
+    await session.jog('s');
+    expect(sentText(), 's');
 
     session.setInvertSteer(true);
     expect(session.invertSteer, isTrue);
+    final beforeInv = sentList().length;
     await session.jog('l');
-    expect(sentText(), 'c,255,255\n');
+    final invSeq = sentList().sublist(beforeInv);
+    expect(invSeq, ['c,0,255\n', 'c,178,255\n']);
 
     await session.jog('s');
     expect(sentText(), 's');
@@ -176,31 +213,62 @@ void main() {
     session.dispose();
   });
 
-  test('走行記録で CSV・PNG・JSON・MD を生成し storage チャネルへ渡す', () async {
+  test('記録未開始でもスキャン到着で地図更新＆障害物アラートが更新される', () {
+    final session = RealSession();
+    session.sensorsOn = true;
+    final p = session.toGridPose(Pose(0, 0, math.pi / 2));
+    session.poseFeed.addPose(p);
+
+    expect(session.grid.knownCount, 0);
+    session.recordScanForTest(
+      Scan(p, Float32List.fromList(List<double>.filled(21, 0.25))),
+    );
+    expect(session.grid.knownCount, greaterThan(0));
+    expect(session.obstacleAlert.severity, ObstacleSeverity.danger);
+    expect(session.obstacleAlert.message, contains('目の前に障害物を感知'));
+
+    session.resetMap();
+    expect(session.grid.knownCount, 0);
+    session.dispose();
+  });
+
+  test('走行記録でコマンド効果CSV・JSON・MDを生成し停止時は自動でドライブを開かない', () async {
     final session = RealSession();
     session.startRecording(mode: 'manual');
     expect(session.isRecording, isTrue);
 
-    final startPose = session.toGridPose(Pose(0, 0, 1.57));
+    final startPose = session.toGridPose(Pose(0, 0, 0));
     session.poseFeed.addPose(startPose);
-    final scan = Scan(
+    final scan1 = Scan(
       startPose,
       Float32List.fromList(List<double>.filled(21, 1.8)),
     );
-    session.recordScanForTest(scan);
+    session.recordScanForTest(scan1);
 
     session.setSpeedNorm(0.20);
     await session.jog('f');
+
+    // 前進命令後に位置と方位と障害物距離が変化した状態を与える
+    final movedPose = session.toGridPose(Pose(0.25, 0.0, 0.15));
+    session.poseFeed.addPose(movedPose);
+    final scan2 = Scan(
+      movedPose,
+      Float32List.fromList(List<double>.filled(21, 1.55)),
+    );
+    session.recordScanForTest(scan2);
+
     await session.jog('s');
 
     final res = await session.stopAndSaveRecording();
     expect(session.isRecording, isFalse);
     expect(res, isNotNull);
-    expect(res!.driveAction, 'intent_opened');
+    // 停止時は勝手にドライブを開かない
+    expect(res!.driveAction, 'local_only');
     expect(res.ok, isTrue);
 
     final saveCall = storageCalls.lastWhere((c) => c.method == 'saveRunBundle');
     final args = saveCall.arguments as Map<dynamic, dynamic>;
+    expect(args['openDriveSheet'], isFalse);
     final runId = args['runId'] as String;
     final files = args['files'] as Map<dynamic, dynamic>;
 
@@ -210,17 +278,38 @@ void main() {
     expect(csv, contains(',cmd,manual,163,0,'));
     expect(csv, contains(',cmd,manual,0,0,'));
 
+    final effectsCsv = files['command_effects_$runId.csv'] as String;
+    expect(effectsCsv, contains('action_label,start_x_m'));
+    expect(effectsCsv, contains(',163,0,前進,'));
+    expect(effectsCsv, contains(',0,0,停止,'));
+
     final png = files['floor_map_$runId.png'] as Uint8List;
     expect(png.sublist(0, 8), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
 
     final jsonMap =
-        jsonDecode(files['floor_map_$runId.json'] as String) as Map<String, dynamic>;
+        jsonDecode(files['floor_map_$runId.json'] as String)
+            as Map<String, dynamic>;
     expect(jsonMap['runId'], runId);
     expect(jsonMap['mode'], 'manual');
+    expect(jsonMap['hasMp4Video'], isTrue);
+    final effects = jsonMap['commandEffects'] as List<dynamic>;
+    expect(effects, hasLength(2));
+    final forwardSeg = effects.first as Map<String, dynamic>;
+    expect(forwardSeg['actionLabel'], '前進');
+    expect(
+      (forwardSeg['distanceMovedM'] as num).toDouble(),
+      closeTo(0.25, 0.01),
+    );
     expect((jsonMap['logOdds'] as List<dynamic>), isNotEmpty);
 
     final md = files['run_summary_$runId.md'] as String;
     expect(md, contains('# 走行記録レポート ($runId)'));
+    expect(md, contains('## コマンド別の車体・センサー変化一覧（命令→結果）'));
+
+    // 明示的にドライブ送信を呼ぶと shareRunToDrive が起動する
+    final shared = await session.saveAndShareToDrive();
+    expect(shared, isTrue);
+    expect(storageCalls.any((c) => c.method == 'shareRunToDrive'), isTrue);
 
     session.dispose();
   });

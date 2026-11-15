@@ -4,25 +4,39 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
+import android.net.Uri
 import android.opengl.EGL14
 import android.opengl.EGLConfig
+import android.opengl.EGLContext
+import android.opengl.EGLDisplay
+import android.opengl.EGLSurface
+import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
+import android.view.Surface
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
+import com.google.ar.core.Coordinates2d
 import com.google.ar.core.Frame
 import com.google.ar.core.Pose
+import com.google.ar.core.RecordingConfig
+import com.google.ar.core.RecordingStatus
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.ar.core.exceptions.UnavailableException
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
+import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 import kotlin.math.atan2
 import kotlin.math.roundToInt
 import kotlin.math.tan
@@ -50,14 +64,22 @@ import kotlin.math.tan
  * 描画無しでトラッキングを回すため、オフスクリーンの EGL pbuffer と
  * ダミーの SurfaceTexture を作り、専用スレッドで session.update() を回す。
  */
-class ArCoreManager(private val activity: Activity) {
+class ArCoreManager(
+    private val activity: Activity,
+    private val textureRegistry: TextureRegistry? = null
+) {
 
     companion object {
         private const val TAG = "ArCoreManager"
         private const val CAMERA_REQUEST_CODE = 0xA001
         private const val RAY_COUNT = 21
+        private const val FRAME_INTERVAL_MS = 33L
+        private const val POSE_INTERVAL_MS = 33L
+        private const val PREVIEW_INTERVAL_MS = 66L
         private const val DEPTH_INTERVAL_MS = 150L
         private const val FALLBACK_INTERVAL_MS = 1000L
+        private const val PREVIEW_WIDTH = 640
+        private const val PREVIEW_HEIGHT = 480
     }
 
     @Volatile private var session: Session? = null
@@ -68,6 +90,12 @@ class ArCoreManager(private val activity: Activity) {
     private var originPose: Pose? = null
     private var lastTracking: String = ""
     private var lastDepthAt: Long = 0L
+    private var lastPosePushAt: Long = 0L
+    private var lastPreviewAt: Long = 0L
+    private var lastCameraTimestamp: Long = -1L
+
+    private var flutterTextureEntry: TextureRegistry.SurfaceTextureEntry? = null
+    private var activeMp4Path: String? = null
 
     /** 前回配信した深度画像のタイムスタンプ（新しい深度かの判定用）。 */
     private var lastDepthTimestamp: Long = -1L
@@ -129,6 +157,62 @@ class ArCoreManager(private val activity: Activity) {
         }
     }
 
+    fun getCameraTextureId(): Long {
+        if (flutterTextureEntry == null && textureRegistry != null) {
+            try {
+                flutterTextureEntry = textureRegistry.createSurfaceTexture().also {
+                    it.surfaceTexture().setDefaultBufferSize(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "createSurfaceTexture failed: ${e.message}")
+            }
+        }
+        return flutterTextureEntry?.id() ?: -1L
+    }
+
+    fun startMp4Recording(rawRunId: String): String? {
+        val safeRunId = rawRunId.trim().replace(Regex("[^A-Za-z0-9_-]"), "")
+        if (safeRunId.isEmpty()) return null
+        val s = session ?: return null
+        try {
+            if (s.recordingStatus == RecordingStatus.OK) {
+                s.stopRecording()
+            }
+            val runsRoot = activity.getExternalFilesDir("runs") ?: return null
+            val runDir = File(runsRoot, "run_$safeRunId")
+            if (!runDir.exists()) {
+                runDir.mkdirs()
+            }
+            val mp4File = File(runDir, "camera_recording_$safeRunId.mp4")
+            val recConfig = RecordingConfig(s)
+                .setMp4DatasetUri(Uri.fromFile(mp4File))
+                .setAutoStopOnPause(true)
+            s.startRecording(recConfig)
+            activeMp4Path = mp4File.absolutePath
+            return activeMp4Path
+        } catch (e: Exception) {
+            Log.w(TAG, "startMp4Recording failed: ${e.message}")
+            activeMp4Path = null
+            return null
+        }
+    }
+
+    fun stopMp4Recording(): String? {
+        val path = activeMp4Path
+        activeMp4Path = null
+        val s = session
+        if (s != null) {
+            try {
+                if (s.recordingStatus == RecordingStatus.OK) {
+                    s.stopRecording()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "stopMp4Recording failed: ${e.message}")
+            }
+        }
+        return if (path != null && File(path).exists()) path else null
+    }
+
     private fun startSession(result: MethodChannel.Result) {
         try {
             val availability = ArCoreApk.getInstance().checkAvailability(activity)
@@ -147,6 +231,7 @@ class ArCoreManager(private val activity: Activity) {
                 )
                 return
             }
+            getCameraTextureId()
             val s = Session(activity)
             val config = Config(s)
             depthSupported = s.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
@@ -158,6 +243,10 @@ class ArCoreManager(private val activity: Activity) {
             session = s
             originPose = null
             lastTracking = ""
+            lastDepthAt = 0L
+            lastPosePushAt = 0L
+            lastPreviewAt = 0L
+            lastCameraTimestamp = -1L
             lastDepthTimestamp = -1L
             running = true
             startWorker(s)
@@ -176,19 +265,20 @@ class ArCoreManager(private val activity: Activity) {
     // ---------------------------------------------------------------- 停止
     fun stop() {
         if (!running && session == null) return
+        stopMp4Recording()
         running = false
+        try {
+            worker?.quitSafely()
+            worker?.join(600)
+        } catch (e: Exception) {
+            Log.w(TAG, "worker stop failed: ${e.message}")
+        }
+        worker = null
         try {
             session?.pause()
         } catch (e: Exception) {
             Log.w(TAG, "pause failed: ${e.message}")
         }
-        try {
-            worker?.quitSafely()
-            worker?.join(500)
-        } catch (e: Exception) {
-            Log.w(TAG, "worker stop failed: ${e.message}")
-        }
-        worker = null
         try {
             session?.close()
         } catch (e: Exception) {
@@ -196,6 +286,24 @@ class ArCoreManager(private val activity: Activity) {
         }
         session = null
         originPose = null
+        lastCameraTimestamp = -1L
+        val entry = flutterTextureEntry
+        flutterTextureEntry = null
+        if (entry != null) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                try {
+                    entry.release()
+                } catch (_: Exception) {
+                }
+            } else {
+                mainHandler.post {
+                    try {
+                        entry.release()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
         pushTracking("STOPPED")
     }
 
@@ -207,33 +315,100 @@ class ArCoreManager(private val activity: Activity) {
         Handler(thread.looper).post { glLoop(s) }
     }
 
-    /** 描画なしで session.update() を回すための最小 EGL 環境でループする。 */
+    @Suppress("DEPRECATION")
+    private fun currentDisplayRotation(): Int {
+        return try {
+            activity.windowManager.defaultDisplay?.rotation ?: Surface.ROTATION_0
+        } catch (_: Exception) {
+            Surface.ROTATION_0
+        }
+    }
+
+    /** 最小 EGL 環境で session.update() を 30Hz 上限で回し、ライブプレビュー用テクスチャも更新する。 */
     private fun glLoop(s: Session) {
         val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val version = IntArray(2)
         EGL14.eglInitialize(display, version, 0, version, 1)
-        val configAttribs = intArrayOf(
+
+        val configs = arrayOfNulls<EGLConfig>(1)
+        val numConfigs = IntArray(1)
+        val bothAttribs = intArrayOf(
             EGL14.EGL_RED_SIZE, 8,
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
             EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT or EGL14.EGL_WINDOW_BIT,
             EGL14.EGL_NONE
         )
-        val configs = arrayOfNulls<EGLConfig>(1)
-        val numConfigs = IntArray(1)
-        EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+        EGL14.eglChooseConfig(display, bothAttribs, 0, configs, 0, 1, numConfigs, 0)
+        if (numConfigs[0] <= 0 || configs[0] == null) {
+            val pbufferOnlyAttribs = intArrayOf(
+                EGL14.EGL_RED_SIZE, 8,
+                EGL14.EGL_GREEN_SIZE, 8,
+                EGL14.EGL_BLUE_SIZE, 8,
+                EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
+                EGL14.EGL_NONE
+            )
+            EGL14.eglChooseConfig(display, pbufferOnlyAttribs, 0, configs, 0, 1, numConfigs, 0)
+        }
+        val chosenConfig = configs[0]
+        if (chosenConfig == null) {
+            Log.w(TAG, "No matching EGLConfig")
+            pushTracking("ERROR")
+            EGL14.eglTerminate(display)
+            return
+        }
+
         val contextAttribs = intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE)
-        val context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+        val context = EGL14.eglCreateContext(display, chosenConfig, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
         val surfaceAttribs = intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE)
-        val surface = EGL14.eglCreatePbufferSurface(display, configs[0], surfaceAttribs, 0)
-        EGL14.eglMakeCurrent(display, surface, surface, context)
+        val pbufferSurface = EGL14.eglCreatePbufferSurface(display, chosenConfig, surfaceAttribs, 0)
+        EGL14.eglMakeCurrent(display, pbufferSurface, pbufferSurface, context)
 
         val textureIds = IntArray(1)
         GLES20.glGenTextures(1, textureIds, 0)
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureIds[0])
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_MIN_FILTER,
+            GLES20.GL_LINEAR
+        )
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_MAG_FILTER,
+            GLES20.GL_LINEAR
+        )
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_WRAP_S,
+            GLES20.GL_CLAMP_TO_EDGE
+        )
+        GLES20.glTexParameteri(
+            GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
+            GLES20.GL_TEXTURE_WRAP_T,
+            GLES20.GL_CLAMP_TO_EDGE
+        )
         val surfaceTexture = SurfaceTexture(textureIds[0])
+
+        val previewBlitter = PreviewBlitter(
+            display = display,
+            eglConfig = chosenConfig,
+            context = context,
+            pbufferSurface = pbufferSurface,
+            cameraTextureId = textureIds[0],
+            targetTexture = flutterTextureEntry?.surfaceTexture()
+        )
+        previewBlitter.init()
+
+        var lastRotation = -1
+        var lastRotationCheckAt = 0L
+
         try {
+            lastRotation = currentDisplayRotation()
+            s.setDisplayGeometry(lastRotation, PREVIEW_WIDTH, PREVIEW_HEIGHT)
             s.setCameraTextureName(textureIds[0])
             s.resume()
         } catch (e: Exception) {
@@ -241,13 +416,38 @@ class ArCoreManager(private val activity: Activity) {
             pushTracking("ERROR")
             running = false
         }
+
         while (running) {
+            val loopStart = System.currentTimeMillis()
             try {
+                if (loopStart - lastRotationCheckAt >= 500L) {
+                    lastRotationCheckAt = loopStart
+                    val rot = currentDisplayRotation()
+                    if (rot != lastRotation) {
+                        lastRotation = rot
+                        s.setDisplayGeometry(rot, PREVIEW_WIDTH, PREVIEW_HEIGHT)
+                    }
+                }
                 val frame = s.update()
+                val camTs = frame.timestamp
+                if (camTs == 0L || camTs == lastCameraTimestamp) {
+                    // LATEST_CAMERA_IMAGE はノンブロッキングのため、未更新時は待機してバッテリー消耗を防ぐ
+                    try {
+                        Thread.sleep(8)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                    continue
+                }
+                lastCameraTimestamp = camTs
                 try {
                     surfaceTexture.updateTexImage()
-                } catch (e: Exception) {
-                    // テクスチャ更新失敗は致命的ではない（次フレームで回復する）
+                } catch (_: Exception) {
+                    // テクスチャ更新失敗は次フレームで回復する
+                }
+                if (loopStart - lastPreviewAt >= PREVIEW_INTERVAL_MS) {
+                    lastPreviewAt = loopStart
+                    previewBlitter.drawFrame(frame)
                 }
                 onFrame(frame)
             } catch (e: Exception) {
@@ -255,21 +455,33 @@ class ArCoreManager(private val activity: Activity) {
                 Log.w(TAG, "update failed: ${e.message}")
                 try {
                     Thread.sleep(50)
-                } catch (ie: InterruptedException) {
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            val elapsed = System.currentTimeMillis() - loopStart
+            val remaining = FRAME_INTERVAL_MS - elapsed
+            if (remaining > 2L && running) {
+                try {
+                    Thread.sleep(remaining.coerceAtMost(25L))
+                } catch (_: InterruptedException) {
                     break
                 }
             }
         }
+
+        previewBlitter.release()
         surfaceTexture.release()
         EGL14.eglMakeCurrent(
             display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT
         )
-        EGL14.eglDestroySurface(display, surface)
+        EGL14.eglDestroySurface(display, pbufferSurface)
         EGL14.eglDestroyContext(display, context)
         EGL14.eglTerminate(display)
     }
 
     private fun onFrame(frame: Frame) {
+        val now = System.currentTimeMillis()
         val camera = frame.camera
         val stateName = when (camera.trackingState) {
             TrackingState.TRACKING -> "TRACKING"
@@ -287,12 +499,12 @@ class ArCoreManager(private val activity: Activity) {
                 originPose = camera.pose
             }
             val origin = originPose
-            if (origin != null) {
+            if (origin != null && now - lastPosePushAt >= POSE_INTERVAL_MS) {
+                lastPosePushAt = now
                 val (x, y, heading) = relativePose(origin, camera.pose)
                 pushPose(x, y, heading)
             }
         }
-        val now = System.currentTimeMillis()
         if (depthSupported) {
             if (now - lastDepthAt >= DEPTH_INTERVAL_MS) {
                 lastDepthAt = now
@@ -492,5 +704,179 @@ class ArCoreManager(private val activity: Activity) {
     private fun pushDepth(rays: DoubleArray) {
         val list = rays.toList()
         mainHandler.post { depthSink?.success(mapOf("ranges" to list)) }
+    }
+
+    /** ARCore の外部 OES カメラ映像を Flutter Texture 用の Window Surface へ描画する。 */
+    private inner class PreviewBlitter(
+        private val display: EGLDisplay,
+        private val eglConfig: EGLConfig,
+        private val context: EGLContext,
+        private val pbufferSurface: EGLSurface,
+        private val cameraTextureId: Int,
+        private val targetTexture: SurfaceTexture?
+    ) {
+        private var windowSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+        private var program = 0
+        private var posLoc = -1
+        private var texLoc = -1
+        private var samplerLoc = -1
+
+        private val quadCoordsBuffer: FloatBuffer = ByteBuffer
+            .allocateDirect(8 * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .apply {
+                put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
+                position(0)
+            }
+
+        private val quadTexBuffer: FloatBuffer = ByteBuffer
+            .allocateDirect(8 * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .apply {
+                put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f))
+                position(0)
+            }
+
+        fun init() {
+            val st = targetTexture ?: return
+            try {
+                val attrs = intArrayOf(EGL14.EGL_NONE)
+                windowSurface = EGL14.eglCreateWindowSurface(display, eglConfig, st, attrs, 0)
+                if (windowSurface == EGL14.EGL_NO_SURFACE) return
+
+                if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, context)) {
+                    release()
+                    return
+                }
+                val vShader = compileShader(
+                    GLES20.GL_VERTEX_SHADER,
+                    """
+                    attribute vec2 aPosition;
+                    attribute vec2 aTexCoord;
+                    varying vec2 vTexCoord;
+                    void main() {
+                      gl_Position = vec4(aPosition, 0.0, 1.0);
+                      vTexCoord = aTexCoord;
+                    }
+                    """.trimIndent()
+                )
+                val fShader = compileShader(
+                    GLES20.GL_FRAGMENT_SHADER,
+                    """
+                    #extension GL_OES_EGL_image_external : require
+                    precision mediump float;
+                    varying vec2 vTexCoord;
+                    uniform samplerExternalOES sTexture;
+                    void main() {
+                      gl_FragColor = texture2D(sTexture, vTexCoord);
+                    }
+                    """.trimIndent()
+                )
+                if (vShader == 0 || fShader == 0) {
+                    if (vShader != 0) GLES20.glDeleteShader(vShader)
+                    if (fShader != 0) GLES20.glDeleteShader(fShader)
+                    release()
+                    return
+                }
+                val prog = GLES20.glCreateProgram()
+                GLES20.glAttachShader(prog, vShader)
+                GLES20.glAttachShader(prog, fShader)
+                GLES20.glLinkProgram(prog)
+                GLES20.glDeleteShader(vShader)
+                GLES20.glDeleteShader(fShader)
+                val linkStatus = IntArray(1)
+                GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0)
+                if (linkStatus[0] == 0) {
+                    GLES20.glDeleteProgram(prog)
+                    release()
+                    return
+                }
+                program = prog
+                posLoc = GLES20.glGetAttribLocation(prog, "aPosition")
+                texLoc = GLES20.glGetAttribLocation(prog, "aTexCoord")
+                samplerLoc = GLES20.glGetUniformLocation(prog, "sTexture")
+            } catch (e: Exception) {
+                Log.w(TAG, "PreviewBlitter init failed: ${e.message}")
+                release()
+            } finally {
+                EGL14.eglMakeCurrent(display, pbufferSurface, pbufferSurface, context)
+            }
+        }
+
+        fun drawFrame(frame: Frame) {
+            if (windowSurface == EGL14.EGL_NO_SURFACE || program == 0) return
+            try {
+                quadCoordsBuffer.position(0)
+                quadTexBuffer.position(0)
+                frame.transformCoordinates2d(
+                    Coordinates2d.OPENGL_NORMALIZED_DEVICE_COORDINATES,
+                    quadCoordsBuffer,
+                    Coordinates2d.TEXTURE_NORMALIZED,
+                    quadTexBuffer
+                )
+                quadCoordsBuffer.position(0)
+                quadTexBuffer.position(0)
+
+                if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, context)) {
+                    return
+                }
+                GLES20.glViewport(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                GLES20.glUseProgram(program)
+
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, cameraTextureId)
+                GLES20.glUniform1i(samplerLoc, 0)
+
+                GLES20.glEnableVertexAttribArray(posLoc)
+                GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, quadCoordsBuffer)
+                GLES20.glEnableVertexAttribArray(texLoc)
+                GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 0, quadTexBuffer)
+
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                GLES20.glDisableVertexAttribArray(posLoc)
+                GLES20.glDisableVertexAttribArray(texLoc)
+                EGL14.eglSwapBuffers(display, windowSurface)
+            } catch (e: Exception) {
+                Log.w(TAG, "PreviewBlitter draw failed: ${e.message}")
+            } finally {
+                EGL14.eglMakeCurrent(display, pbufferSurface, pbufferSurface, context)
+                GLES20.glViewport(0, 0, 1, 1)
+            }
+        }
+
+        fun release() {
+            if (program != 0) {
+                try {
+                    GLES20.glDeleteProgram(program)
+                } catch (_: Exception) {
+                }
+                program = 0
+            }
+            if (windowSurface != EGL14.EGL_NO_SURFACE) {
+                try {
+                    EGL14.eglDestroySurface(display, windowSurface)
+                } catch (_: Exception) {
+                }
+                windowSurface = EGL14.EGL_NO_SURFACE
+            }
+        }
+
+        private fun compileShader(type: Int, src: String): Int {
+            val shader = GLES20.glCreateShader(type)
+            if (shader == 0) return 0
+            GLES20.glShaderSource(shader, src)
+            GLES20.glCompileShader(shader)
+            val status = IntArray(1)
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0)
+            if (status[0] == 0) {
+                GLES20.glDeleteShader(shader)
+                return 0
+            }
+            return shader
+        }
     }
 }

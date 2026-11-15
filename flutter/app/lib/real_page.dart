@@ -7,13 +7,20 @@ import 'map_painter.dart';
 import 'platform/serial_link.dart';
 import 'real/real_session.dart';
 
-/// 実機モードの画面。
+enum _WorkMode { walkScan, rcControl }
+
+enum _RcInputType { buttons, flick }
+
+/// 実機アプリ画面。
 ///
-/// ARCore（自己位置＋深度）と ESP32（USB シリアル）の状態を表示し、
-/// VFH 自律クルーズ／探索／ゴール指定ナビを操作する。
-/// 安全のため、実機走行は必ず監視下・低速で行うこと（README 参照）。
+/// 問題を2つに分割し、
+/// 1) 歩いてカメラ＋深度マップを測定・録画保存する「歩いてマップ測定」モード
+/// 2) ESP32 とつないで前後左右・旋回の反応を記録テストする「ラジコン操縦テスト」モード
+/// を上部のタブで切り替える。シミュレーションや詳細設定は「⚙ 設定」内に退避する。
 class RealPage extends StatefulWidget {
-  const RealPage({super.key});
+  final RealSession? session;
+
+  const RealPage({super.key, this.session});
 
   @override
   State<RealPage> createState() => _RealPageState();
@@ -21,15 +28,33 @@ class RealPage extends StatefulWidget {
 
 class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
   bool _floorScale = false;
+  bool _followRobot = true;
+  bool _cameraMain = true;
+  _WorkMode _workMode = _WorkMode.walkScan;
+  _RcInputType _rcInputType = _RcInputType.buttons;
+
   late RealSession _session;
+  late bool _ownsSession;
   StreamSubscription<void>? _sub;
   Timer? _jogTimer;
+  String? _activeFlickDir;
+  Offset _flickOffset = Offset.zero;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initSession(autoStart: true);
+    final injected = widget.session;
+    if (injected != null) {
+      _session = injected;
+      _ownsSession = false;
+      _sub = _session.updates.listen((_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      _ownsSession = true;
+      _initSession(autoStart: true);
+    }
   }
 
   void _initSession({
@@ -38,8 +63,9 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     bool? invertSteer,
     bool? autoDriveSync,
   }) {
-    final params =
-        _floorScale ? RealSession.floorParams : RealSession.roomParams;
+    final params = _floorScale
+        ? RealSession.floorParams
+        : RealSession.roomParams;
     _session = RealSession(customParams: params);
     if (speedNorm != null) _session.setSpeedNorm(speedNorm);
     if (invertSteer != null) _session.setInvertSteer(invertSteer);
@@ -60,15 +86,17 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     _stopJog(sendStop: false);
     await _sub?.cancel();
     _sub = null;
-    try {
-      await _session.disconnectSerial();
-      await _session.stopSensors();
-    } catch (_) {
+    if (_ownsSession) {
+      try {
+        await _session.disconnectSerial();
+        await _session.stopSensors();
+      } catch (_) {}
+      _session.dispose();
     }
-    _session.dispose();
     if (!mounted) return;
     setState(() {
       _floorScale = floorMode;
+      _ownsSession = true;
       _initSession(
         autoStart: true,
         speedNorm: prevSpeed,
@@ -83,12 +111,12 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     _stopJog(sendStop: false);
     WidgetsBinding.instance.removeObserver(this);
     _sub?.cancel();
-    _session.dispose();
+    if (_ownsSession) {
+      _session.dispose();
+    }
     super.dispose();
   }
 
-  /// R4: 背面に移ったら走行を止め、復帰したら状態の再評価を促す。
-  /// 走行の自動再開はしない（再開時はドライバが現在位置から再計画）。
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
@@ -102,33 +130,22 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
 
   void _onTapMap(TapDownDetails details, Size size) {
     if (!_session.explored || _session.busy) return;
-    final params = _session.params;
-    final cw = size.width / params.gridW;
-    final ch = size.height / params.gridH;
-    final c = (details.localPosition.dx / cw).floor();
-    final rFromTop = (details.localPosition.dy / ch).floor();
-    final r = params.gridH - 1 - rFromTop;
-    if (r < 0 || r >= params.gridH || c < 0 || c >= params.gridW) return;
-    _session.selectGoal((r: r, c: c));
-  }
-
-  String get _linkLabel => switch (_session.linkState) {
-        Esp32LinkState.connected => '接続済み',
-        Esp32LinkState.connecting => '接続中…',
-        Esp32LinkState.error => 'エラー',
-        Esp32LinkState.disconnected => '未接続',
-      };
-
-  String get _poseLabel {
-    final p = _session.latestPose;
-    if (p == null) return '—';
-    final deg = p.heading * 180 / math.pi;
-    return 'x=${p.x.toStringAsFixed(2)}m y=${p.y.toStringAsFixed(2)}m '
-        '${deg.toStringAsFixed(0)}°';
+    final cell = MapPainter.cellAtTap(
+      tap: details.localPosition,
+      size: size,
+      params: _session.params,
+      robotPose: _session.latestPose,
+      followRobot: _followRobot,
+    );
+    if (cell != null) {
+      _session.selectGoal(cell);
+    }
   }
 
   void _startJog(String ch) {
+    if (ch != 's' && _activeFlickDir == ch && _jogTimer != null) return;
     _jogTimer?.cancel();
+    _activeFlickDir = ch == 's' ? null : ch;
     unawaited(_session.jog(ch));
     if (ch == 's') return;
     _jogTimer = Timer.periodic(
@@ -138,75 +155,13 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
   }
 
   void _stopJog({bool sendStop = true}) {
-    final hadTimer = _jogTimer != null;
+    final hadTimer = _jogTimer != null || _activeFlickDir != null;
     _jogTimer?.cancel();
     _jogTimer = null;
+    _activeFlickDir = null;
     if (sendStop && hadTimer) {
       unawaited(_session.jog('s'));
     }
-  }
-
-  Widget _smallToggle(String label, bool active, VoidCallback? onPressed) {
-    final bg = active ? const Color(0xFF111827) : Colors.white;
-    final fg = active ? Colors.white : const Color(0xFF374151);
-    return OutlinedButton(
-      onPressed: onPressed,
-      style: OutlinedButton.styleFrom(
-        backgroundColor: bg,
-        foregroundColor: fg,
-        side: BorderSide(
-          color: active ? const Color(0xFF111827) : const Color(0xFFD1D5DB),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        minimumSize: const Size(0, 32),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-        textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-      ),
-      child: Text(label),
-    );
-  }
-
-  Widget _jogButton(String label, String ch) {
-    final connected = _session.linkState == Esp32LinkState.connected;
-    final buttonStyle = OutlinedButton.styleFrom(
-      foregroundColor: const Color(0xFF111827),
-      side: const BorderSide(color: Color(0xFFD1D5DB)),
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      minimumSize: const Size(0, 42),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-    );
-    if (!connected) {
-      return OutlinedButton(
-        onPressed: null,
-        style: buttonStyle,
-        child: Text(label),
-      );
-    }
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => _startJog(ch),
-      onTapUp: (_) => _stopJog(sendStop: ch != 's'),
-      onTapCancel: () => _stopJog(sendStop: ch != 's'),
-      child: IgnorePointer(
-        child: OutlinedButton(
-          onPressed: () {},
-          style: buttonStyle,
-          child: Text(label),
-        ),
-      ),
-    );
-  }
-
-  String get _recordLabel {
-    if (_session.isRecording) {
-      return '記録中 (${_session.recordedRowCount}件)';
-    }
-    final latest = _session.lastSavedRunId;
-    return latest == null
-        ? '待機中 (${_session.lastSaveStatus})'
-        : '待機中 (最新: $latest / ${_session.lastSaveStatus})';
   }
 
   Future<void> _editWebhookUrl() async {
@@ -220,8 +175,8 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'scripts/google_drive_webhook.gs をデプロイした URL を設定すると、'
-              '走行終了時に画面操作なしでドライブへ自動保存します。空欄時は共有画面を開きます。',
+              'scripts/google_drive_webhook.gs の URL を設定すると、'
+              '記録停止時に自動保存します。空欄時は送信ボタンを押したときだけ共有画面を開きます。',
               style: TextStyle(fontSize: 12, color: Color(0xFF4B5563)),
             ),
             const SizedBox(height: 10),
@@ -258,55 +213,306 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     }
   }
 
-  Widget _buildInfoBox({required EdgeInsetsGeometry margin}) {
+  Future<void> _openSettingsSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            void refresh() {
+              setModalState(() {});
+              if (mounted) setState(() {});
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          '設定・テスト機能',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 12),
+                    SwitchListTile(
+                      dense: true,
+                      title: const Text('ARCore センサー'),
+                      subtitle: Text(
+                        '状態: ${_session.trackingState} (${_session.sensorHealth})',
+                      ),
+                      value: _session.sensorsOn,
+                      onChanged: (v) async {
+                        if (v) {
+                          await _session.startSensors();
+                        } else {
+                          await _session.stopSensors();
+                        }
+                        refresh();
+                      },
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      title: const Text('操舵反転（左右モーター極性入れ替え）'),
+                      value: _session.invertSteer,
+                      onChanged: (v) {
+                        _session.setInvertSteer(v);
+                        refresh();
+                      },
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      title: const Text('記録停止時の Webhook 自動転送'),
+                      subtitle: const Text('Webhook URL 未設定時は自動でドライブ画面を開きません'),
+                      value: _session.autoDriveSync,
+                      onChanged: (v) {
+                        _session.setAutoDriveSync(v);
+                        refresh();
+                      },
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const Text('測定エリア:', style: TextStyle(fontSize: 13)),
+                        const SizedBox(width: 10),
+                        ChoiceChip(
+                          label: const Text('部屋 6×5m'),
+                          selected: !_floorScale,
+                          onSelected: _session.busy
+                              ? null
+                              : (sel) async {
+                                  if (sel) {
+                                    Navigator.of(ctx).pop();
+                                    await _switchScale(false);
+                                  }
+                                },
+                        ),
+                        const SizedBox(width: 8),
+                        ChoiceChip(
+                          label: const Text('フロア 24×24m'),
+                          selected: _floorScale,
+                          onSelected: _session.busy
+                              ? null
+                              : (sel) async {
+                                  if (sel) {
+                                    Navigator.of(ctx).pop();
+                                    await _switchScale(true);
+                                  }
+                                },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        Navigator.of(ctx).pop();
+                        await _editWebhookUrl();
+                      },
+                      icon: const Icon(Icons.link, size: 18),
+                      label: Text(
+                        _session.driveWebhookUrl.isEmpty
+                            ? 'Google ドライブ Webhook URL を設定'
+                            : 'Webhook URL を編集（設定済み）',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      '上級: 自律走行テスト（ラジコン動作確認後に使用）',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _session.busy
+                                ? null
+                                : () {
+                                    Navigator.of(ctx).pop();
+                                    unawaited(_session.runAutoCruise());
+                                  },
+                            child: const Text('VFH自律'),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _session.busy
+                                ? null
+                                : () {
+                                    Navigator.of(ctx).pop();
+                                    unawaited(_session.runExploration());
+                                  },
+                            child: const Text('A*探索'),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _session.path == null || _session.busy
+                                ? null
+                                : () {
+                                    Navigator.of(ctx).pop();
+                                    unawaited(_session.goToGoal());
+                                  },
+                            child: const Text('ゴール'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildHeaderBar() {
     return Container(
-      margin: margin,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
-        borderRadius: BorderRadius.circular(6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          Text(
-            'ARCore: ${_session.trackingState}  |  '
-            'センサー: ${_session.sensorHealth}  |  ESP32: $_linkLabel',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFF374151),
+          Expanded(
+            child: SegmentedButton<_WorkMode>(
+              showSelectedIcon: false,
+              style: SegmentedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                textStyle: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+                selectedBackgroundColor: const Color(0xFF111827),
+                selectedForegroundColor: Colors.white,
+              ),
+              segments: const [
+                ButtonSegment(
+                  key: Key('mode_walk'),
+                  value: _WorkMode.walkScan,
+                  label: Text('① 歩いてマップ測定'),
+                ),
+                ButtonSegment(
+                  key: Key('mode_rc'),
+                  value: _WorkMode.rcControl,
+                  label: Text('② ラジコン操縦'),
+                ),
+              ],
+              selected: {_workMode},
+              onSelectionChanged: (sel) {
+                if (sel.first != _WorkMode.rcControl) {
+                  _stopJog(
+                    sendStop: _session.linkState == Esp32LinkState.connected,
+                  );
+                }
+                setState(() => _workMode = sel.first);
+              },
             ),
           ),
-          const SizedBox(height: 2),
-          Text(
-            '位置: $_poseLabel  |  '
-            '面積: ${_session.mappedAreaM2.toStringAsFixed(1)}m² '
-            '(${(_session.grid.coverage * 100).toStringAsFixed(1)}%)  |  '
-            '指令: ${_session.link.lastCommand}',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFF374151),
+          const SizedBox(width: 6),
+          OutlinedButton(
+            key: const Key('settings_btn'),
+            onPressed: _openSettingsSheet,
+            style: OutlinedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              minimumSize: const Size(0, 34),
+              side: const BorderSide(color: Color(0xFFD1D5DB)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            '記録: $_recordLabel',
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFF374151),
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _session.status,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF111827),
+            child: const Text(
+              '⚙ 設定',
+              style: TextStyle(fontSize: 12, color: Color(0xFF111827)),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildObstacleBanner() {
+    final alert = _session.obstacleAlert;
+    final bg = switch (alert.severity) {
+      ObstacleSeverity.danger => const Color(0xFFDC2626),
+      ObstacleSeverity.caution => const Color(0xFFD97706),
+      ObstacleSeverity.clear => const Color(0xFF059669),
+      ObstacleSeverity.unknown => const Color(0xFF475569),
+    };
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: bg,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              alert.message,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Text(
+            '記録 ${_session.mappedAreaM2.toStringAsFixed(1)}m²',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCameraWidget() {
+    final texId = _session.cameraTextureId;
+    if (!_session.sensorsOn || texId == null || texId < 0) {
+      return Container(
+        color: const Color(0xFF111827),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(8),
+        child: const Text(
+          'カメラ待機中\n（実機センサー開始でライブ表示）',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
+        ),
+      );
+    }
+    return Container(
+      color: Colors.black,
+      child: ClipRect(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: 640,
+            height: 480,
+            child: Texture(textureId: texId),
+          ),
+        ),
       ),
     );
   }
@@ -334,6 +540,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               targetHeading: _session.hudTargetHeading,
               targetDistM: _session.hudTargetDistM,
               mappingParams: params,
+              followRobot: _followRobot,
             ),
           ),
         );
@@ -341,101 +548,578 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildControlPanel(
-    BuildContext context, {
-    required EdgeInsetsGeometry padding,
-  }) {
-    final compactShape =
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(6));
+  Widget _buildStageArea() {
+    final mainChild = _cameraMain ? _buildCameraWidget() : _buildMapWidget();
+    final pipChild = _cameraMain ? _buildMapWidget() : _buildCameraWidget();
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        mainChild,
+        Positioned(
+          top: 8,
+          left: 8,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xBB111827),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              _cameraMain
+                  ? 'カメラ映像（ARCore ${_session.trackingState}）'
+                  : (_followRobot ? '障害物マップ（自分中心・赤=壁）' : '障害物マップ（全体図）'),
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+          ),
+        ),
+        if (!_cameraMain || !_followRobot)
+          Positioned(
+            top: 8,
+            right: 8,
+            child: GestureDetector(
+              onTap: () => setState(() => _followRobot = !_followRobot),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xCC111827),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  _followRobot ? '全体図へ' : '自分拡大へ',
+                  style: const TextStyle(color: Colors.white, fontSize: 11),
+                ),
+              ),
+            ),
+          ),
+        Positioned(
+          right: 10,
+          bottom: 10,
+          child: GestureDetector(
+            key: const Key('pip_swap'),
+            onTap: () => setState(() => _cameraMain = !_cameraMain),
+            child: Container(
+              width: 128,
+              height: 96,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white, width: 2),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black26,
+                    blurRadius: 6,
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  IgnorePointer(child: pipChild),
+                  Positioned(
+                    left: 4,
+                    bottom: 4,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xBB000000),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        _cameraMain ? '地図 (タップで拡大)' : 'カメラ (タップで拡大)',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRecordActionRow() {
+    final rec = _session.isRecording;
+    return Row(
+      children: [
+        Expanded(
+          flex: 3,
+          child: FilledButton(
+            key: const Key('record_toggle_btn'),
+            style: FilledButton.styleFrom(
+              backgroundColor: rec
+                  ? const Color(0xFFDC2626)
+                  : const Color(0xFF111827),
+              foregroundColor: Colors.white,
+              minimumSize: const Size(0, 44),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            onPressed: _session.busy
+                ? null
+                : () => unawaited(_session.toggleManualRecording()),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                rec
+                    ? '⏹ 記録を止めて保存 (${_session.recordedRowCount}件)'
+                    : '🔴 カメラ＋マップ記録 開始',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          flex: 2,
+          child: OutlinedButton(
+            key: const Key('drive_send_btn'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF111827),
+              side: const BorderSide(color: Color(0xFFD1D5DB)),
+              minimumSize: const Size(0, 44),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            onPressed: _session.busy
+                ? null
+                : () => unawaited(_session.saveAndShareToDrive()),
+            child: const FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                '☁ ドライブへ送る',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildWalkPanel({required EdgeInsetsGeometry padding}) {
+    final pose = _session.latestPose;
+    final posText = pose == null
+        ? '位置未確定'
+        : '移動 (${pose.x.toStringAsFixed(2)}m, ${pose.y.toStringAsFixed(2)}m) '
+              '向 ${(pose.heading * 180 / math.pi).toStringAsFixed(0)}°';
     return Padding(
       padding: padding,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Wrap(
-            spacing: 4,
-            runSpacing: 4,
-            alignment: WrapAlignment.spaceBetween,
+          _buildRecordActionRow(),
+          const SizedBox(height: 8),
+          Row(
             children: [
-              Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: [
-                  _smallToggle(
-                    '6×5m',
-                    !_floorScale,
-                    _session.busy ? null : () => unawaited(_switchScale(false)),
-                  ),
-                  _smallToggle(
-                    '24×24m',
-                    _floorScale,
-                    _session.busy ? null : () => unawaited(_switchScale(true)),
-                  ),
-                  _smallToggle(
-                    '操舵反転',
-                    _session.invertSteer,
-                    () => _session.setInvertSteer(!_session.invertSteer),
-                  ),
-                  _smallToggle(
-                    _session.isRecording ? '記録保存' : '手動記録',
-                    _session.isRecording,
-                    _session.busy
-                        ? null
-                        : () => unawaited(_session.toggleManualRecording()),
-                  ),
-                  _smallToggle(
-                    '自動ドライブ',
-                    _session.autoDriveSync,
-                    () => _session.setAutoDriveSync(!_session.autoDriveSync),
-                  ),
-                  _smallToggle(
-                    'ドライブ送信',
-                    false,
-                    _session.lastSavedRunId == null
-                        ? null
-                        : () => unawaited(_session.shareLatestToDrive()),
-                  ),
-                  _smallToggle(
-                    'URL設定',
-                    _session.driveWebhookUrl.isNotEmpty,
-                    () => unawaited(_editWebhookUrl()),
-                  ),
-                ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '$posText  |  保存: ${_session.lastSaveStatus}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF374151),
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      _session.status,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF111827),
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
               ),
-              Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: [
-                  _smallToggle(
-                    'センサー',
-                    _session.sensorsOn,
-                    _session.sensorsOn
-                        ? () => _session.stopSensors()
-                        : () => _session.startSensors(),
+              const SizedBox(width: 8),
+              OutlinedButton(
+                key: const Key('reset_map_btn'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF374151),
+                  side: const BorderSide(color: Color(0xFFD1D5DB)),
+                  minimumSize: const Size(0, 38),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
                   ),
-                  _smallToggle(
-                    'ESP32',
-                    _session.linkState == Esp32LinkState.connected,
-                    _session.linkState == Esp32LinkState.connected
-                        ? () => _session.disconnectSerial()
-                        : () => _session.connectSerial(),
-                  ),
-                ],
+                ),
+                onPressed: _session.isRecording || _session.busy
+                    ? null
+                    : _session.resetMap,
+                child: const Text('🗑 マップ消去', style: TextStyle(fontSize: 12)),
               ),
             ],
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _jogButton(String label, String ch, {Color? bgColor, Color? fgColor}) {
+    final connected = _session.linkState == Esp32LinkState.connected;
+    final buttonStyle = OutlinedButton.styleFrom(
+      backgroundColor: bgColor ?? Colors.white,
+      foregroundColor: fgColor ?? const Color(0xFF111827),
+      side: BorderSide(color: bgColor ?? const Color(0xFFD1D5DB)),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      minimumSize: const Size(0, 44),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+    );
+    if (!connected) {
+      return OutlinedButton(
+        onPressed: null,
+        style: buttonStyle,
+        child: Text(label),
+      );
+    }
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _startJog(ch),
+      onTapUp: (_) => _stopJog(sendStop: ch != 's'),
+      onTapCancel: () => _stopJog(sendStop: ch != 's'),
+      child: IgnorePointer(
+        child: OutlinedButton(
+          onPressed: () {},
+          style: buttonStyle,
+          child: Text(label),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildButtonPad() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          children: [
+            const Spacer(),
+            Expanded(flex: 2, child: _jogButton('▲ 前', 'f')),
+            const Spacer(),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(child: _jogButton('◀ 左', 'l')),
+            const SizedBox(width: 6),
+            Expanded(
+              child: _jogButton(
+                '停止',
+                's',
+                bgColor: const Color(0xFFDC2626),
+                fgColor: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(child: _jogButton('右 ▶', 'r')),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            const Spacer(),
+            Expanded(flex: 2, child: _jogButton('▼ 後', 'b')),
+            const Spacer(),
+          ],
+        ),
+      ],
+    );
+  }
+
+  void _handleFlickDelta(Offset localPos, Size boxSize) {
+    final center = Offset(boxSize.width / 2, boxSize.height / 2);
+    final raw = localPos - center;
+    final maxR = (math.min(boxSize.width, boxSize.height) / 2 - 18).clamp(
+      24.0,
+      64.0,
+    );
+    final dist = raw.distance;
+    final clamped = dist > maxR ? raw * (maxR / dist) : raw;
+
+    String? nextDir;
+    if (dist >= 20) {
+      if (raw.dy.abs() >= raw.dx.abs()) {
+        nextDir = raw.dy < 0 ? 'f' : 'b';
+      } else {
+        nextDir = raw.dx < 0 ? 'l' : 'r';
+      }
+    }
+    setState(() => _flickOffset = clamped);
+    if (nextDir == null) {
+      if (_activeFlickDir != null) {
+        _stopJog(sendStop: true);
+      }
+    } else if (_activeFlickDir != nextDir) {
+      _startJog(nextDir);
+    }
+  }
+
+  Widget _buildFlickPad() {
+    final connected = _session.linkState == Esp32LinkState.connected;
+    final dirLabel = switch (_activeFlickDir) {
+      'f' => '前進中',
+      'b' => '後退中',
+      'l' => '左旋回（先当て舵）',
+      'r' => '右旋回（先当て舵）',
+      _ => connected ? '上下左右にスライドして操縦（離すと停止）' : '先に ESP32 を接続してください',
+    };
+    return Row(
+      children: [
+        Expanded(
+          child: SizedBox(
+            height: 132,
+            child: LayoutBuilder(
+              builder: (ctx, constraints) {
+                final size = Size(constraints.maxWidth, constraints.maxHeight);
+                return GestureDetector(
+                  key: const Key('flick_pad'),
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: !connected
+                      ? null
+                      : (d) => _handleFlickDelta(d.localPosition, size),
+                  onPanUpdate: !connected
+                      ? null
+                      : (d) => _handleFlickDelta(d.localPosition, size),
+                  onPanEnd: (_) {
+                    _stopJog(sendStop: connected);
+                    setState(() => _flickOffset = Offset.zero);
+                  },
+                  onPanCancel: () {
+                    _stopJog(sendStop: connected);
+                    setState(() => _flickOffset = Offset.zero);
+                  },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: connected
+                          ? const Color(0xFFF3F4F6)
+                          : const Color(0xFFE5E7EB),
+                      border: Border.all(
+                        color: _activeFlickDir != null
+                            ? const Color(0xFF111827)
+                            : const Color(0xFFD1D5DB),
+                        width: 1.5,
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        const Positioned(
+                          top: 6,
+                          child: Text(
+                            '前',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                        ),
+                        const Positioned(
+                          bottom: 6,
+                          child: Text(
+                            '後',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                        ),
+                        const Positioned(
+                          left: 10,
+                          child: Text(
+                            '左',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                        ),
+                        const Positioned(
+                          right: 10,
+                          child: Text(
+                            '右',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                        ),
+                        Transform.translate(
+                          offset: _flickOffset,
+                          child: Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: connected
+                                  ? const Color(0xFF111827)
+                                  : const Color(0xFF9CA3AF),
+                              shape: BoxShape.circle,
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              _activeFlickDir?.toUpperCase() ?? '●',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          right: 8,
+                          bottom: 6,
+                          child: Text(
+                            dirLabel,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: Color(0xFF374151),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 72,
+          height: 132,
+          child: FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+              padding: EdgeInsets.zero,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onPressed: () {
+              _stopJog(sendStop: false);
+              unawaited(_session.emergencyStop());
+            },
+            child: const Text(
+              '非常\n停止',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRcPanel({required EdgeInsetsGeometry padding}) {
+    final connected = _session.linkState == Esp32LinkState.connected;
+    final linkText = switch (_session.linkState) {
+      Esp32LinkState.connected =>
+        '🔌 ESP32 接続済み (${_session.link.lastCommand})',
+      Esp32LinkState.connecting => '🔌 ESP32 接続中…',
+      Esp32LinkState.error => '🔌 ESP32 接続エラー',
+      Esp32LinkState.disconnected => '🔌 ESP32 未接続',
+    };
+
+    return Padding(
+      padding: padding,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: connected
+                  ? const Color(0xFFECFDF5)
+                  : const Color(0xFFF3F4F6),
+              border: Border.all(
+                color: connected
+                    ? const Color(0xFF10B981)
+                    : const Color(0xFFD1D5DB),
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    linkText,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: connected
+                          ? const Color(0xFF065F46)
+                          : const Color(0xFF374151),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  key: const Key('esp32_connect_btn'),
+                  onPressed: connected
+                      ? () => unawaited(_session.disconnectSerial())
+                      : () => unawaited(_session.connectSerial()),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    minimumSize: const Size(0, 30),
+                    backgroundColor: connected
+                        ? Colors.white
+                        : const Color(0xFF111827),
+                    foregroundColor: connected
+                        ? const Color(0xFF111827)
+                        : Colors.white,
+                  ),
+                  child: Text(
+                    connected ? '切断' : '接続する',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 6),
+          _buildRecordActionRow(),
+          const SizedBox(height: 4),
           Row(
             children: [
-              SizedBox(
-                width: 128,
-                child: Text(
-                  '速度 ${(_session.speedNorm * 100).round()}% '
-                  '(PWM ${_session.currentDrivePwm})',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF111827),
-                  ),
+              Text(
+                '速度 ${(_session.speedNorm * 100).round()}% '
+                '(PWM ${_session.currentDrivePwm})',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF111827),
                 ),
               ),
               Expanded(
@@ -446,7 +1130,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                       enabledThumbRadius: 7,
                     ),
                     overlayShape: const RoundSliderOverlayShape(
-                      overlayRadius: 14,
+                      overlayRadius: 12,
                     ),
                   ),
                   child: Slider(
@@ -460,159 +1144,98 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                   ),
                 ),
               ),
-            ],
-          ),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFF111827),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    minimumSize: const Size(0, 40),
-                    shape: compactShape,
-                    textStyle: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  onPressed:
-                      _session.busy ? null : () => _session.runAutoCruise(),
-                  child: const FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text('マップ作成', maxLines: 1),
-                  ),
+              SegmentedButton<_RcInputType>(
+                showSelectedIcon: false,
+                style: SegmentedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  textStyle: const TextStyle(fontSize: 11),
                 ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFF111827),
-                    side: const BorderSide(color: Color(0xFFD1D5DB)),
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    minimumSize: const Size(0, 40),
-                    shape: compactShape,
-                    textStyle: const TextStyle(fontSize: 12),
+                segments: const [
+                  ButtonSegment(
+                    key: Key('input_toggle_buttons'),
+                    value: _RcInputType.buttons,
+                    label: Text('ボタン'),
                   ),
-                  onPressed:
-                      _session.busy ? null : () => _session.runExploration(),
-                  child: const FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text('A*探索', maxLines: 1),
+                  ButtonSegment(
+                    key: Key('input_toggle_flick'),
+                    value: _RcInputType.flick,
+                    label: Text('フリック'),
                   ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFF111827),
-                    side: const BorderSide(color: Color(0xFFD1D5DB)),
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    minimumSize: const Size(0, 40),
-                    shape: compactShape,
-                    textStyle: const TextStyle(fontSize: 12),
-                  ),
-                  onPressed: _session.path == null || _session.busy
-                      ? null
-                      : () => _session.goToGoal(),
-                  child: const FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text('ゴール移動', maxLines: 1),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFFDC2626),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    minimumSize: const Size(0, 40),
-                    shape: compactShape,
-                    textStyle: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  onPressed: () => _session.emergencyStop(),
-                  child: const FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text('停止', maxLines: 1),
-                  ),
-                ),
+                ],
+                selected: {_rcInputType},
+                onSelectionChanged: (s) {
+                  _stopJog(sendStop: connected);
+                  setState(() {
+                    _rcInputType = s.first;
+                    _flickOffset = Offset.zero;
+                  });
+                },
               ),
             ],
           ),
-          const SizedBox(height: 6),
-          Row(
-            children: [
-              Expanded(child: _jogButton('前', 'f')),
-              const SizedBox(width: 6),
-              Expanded(child: _jogButton('左', 'l')),
-              const SizedBox(width: 6),
-              Expanded(child: _jogButton('止', 's')),
-              const SizedBox(width: 6),
-              Expanded(child: _jogButton('右', 'r')),
-              const SizedBox(width: 6),
-              Expanded(child: _jogButton('後', 'b')),
-            ],
-          ),
+          const SizedBox(height: 4),
+          _rcInputType == _RcInputType.buttons
+              ? _buildButtonPad()
+              : _buildFlickPad(),
         ],
       ),
     );
+  }
+
+  Widget _buildActiveControlPanel({required EdgeInsetsGeometry padding}) {
+    return _workMode == _WorkMode.walkScan
+        ? _buildWalkPanel(padding: padding)
+        : _buildRcPanel(padding: padding);
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        top: false,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final isLandscape = constraints.maxWidth > constraints.maxHeight;
-            if (isLandscape) {
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(child: _buildMapWidget()),
-                  const VerticalDivider(width: 1, color: Color(0xFFE5E7EB)),
-                  SizedBox(
-                    width: 336,
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _buildInfoBox(
-                            margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+        child: Column(
+          children: [
+            _buildHeaderBar(),
+            _buildObstacleBanner(),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final isLandscape =
+                      constraints.maxWidth > constraints.maxHeight;
+                  if (isLandscape) {
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(child: _buildStageArea()),
+                        const VerticalDivider(
+                          width: 1,
+                          color: Color(0xFFE5E7EB),
+                        ),
+                        SizedBox(
+                          width: 348,
+                          child: SingleChildScrollView(
+                            child: _buildActiveControlPanel(
+                              padding: const EdgeInsets.all(10),
+                            ),
                           ),
-                          _buildControlPanel(
-                            context,
-                            padding: const EdgeInsets.fromLTRB(10, 4, 10, 10),
-                          ),
-                        ],
+                        ),
+                      ],
+                    );
+                  }
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: _buildStageArea()),
+                      const Divider(height: 1, color: Color(0xFFE5E7EB)),
+                      _buildActiveControlPanel(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
                       ),
-                    ),
-                  ),
-                ],
-              );
-            }
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _buildInfoBox(margin: const EdgeInsets.fromLTRB(12, 4, 12, 6)),
-                Expanded(child: _buildMapWidget()),
-                const Divider(height: 1, color: Color(0xFFE5E7EB)),
-                _buildControlPanel(
-                  context,
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-                ),
-              ],
-            );
-          },
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );

@@ -19,6 +19,7 @@ import io.flutter.plugin.common.MethodChannel
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -163,6 +164,10 @@ class LogStorageManager(private val activity: Activity) {
             for ((name, bytes) in byteFiles) {
                 saveToMediaStoreDownloads(safeRunId, name, bytes)
             }
+            val mp4File = File(runDir, "camera_recording_$safeRunId.mp4")
+            if (mp4File.exists() && mp4File.isFile && mp4File.length() > 0L) {
+                copyFileToMediaStoreDownloads(safeRunId, mp4File)
+            }
         }
 
         val webhookUrl = getWebhookUrl().trim()
@@ -253,6 +258,24 @@ class LogStorageManager(private val activity: Activity) {
     }
 
     private fun saveToMediaStoreDownloads(runId: String, fileName: String, bytes: ByteArray) {
+        writeToMediaStoreDownloads(runId, fileName) { out ->
+            out.write(bytes)
+        }
+    }
+
+    private fun copyFileToMediaStoreDownloads(runId: String, file: File) {
+        writeToMediaStoreDownloads(runId, file.name) { out ->
+            FileInputStream(file).use { input ->
+                input.copyTo(out)
+            }
+        }
+    }
+
+    private fun writeToMediaStoreDownloads(
+        runId: String,
+        fileName: String,
+        writer: (java.io.OutputStream) -> Unit
+    ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         try {
             val resolver = activity.contentResolver
@@ -263,9 +286,7 @@ class LogStorageManager(private val activity: Activity) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
-            resolver.openOutputStream(uri)?.use { out ->
-                out.write(bytes)
-            }
+            resolver.openOutputStream(uri)?.use(writer)
         } catch (_: Exception) {
             // Download 領域への複製失敗時でもアプリ領域への保存は生かす。
         }
@@ -349,6 +370,7 @@ class LogStorageManager(private val activity: Activity) {
                 lower.endsWith(".png") -> "image/png"
                 lower.endsWith(".json") -> "application/json"
                 lower.endsWith(".md") -> "text/markdown"
+                lower.endsWith(".mp4") -> "video/mp4"
                 else -> "application/octet-stream"
             }
         }

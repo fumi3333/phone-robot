@@ -11,7 +11,7 @@ import io.flutter.plugin.common.MethodChannel
  * 実処理は ArCoreManager（自己位置＋Depth）と SerialManager（ESP32）にある。
  *
  * チャネル一覧:
- *  - MethodChannel "phone_robot/arcore"  : startPoseTracking / stopPoseTracking
+ *  - MethodChannel "phone_robot/arcore"  : startPoseTracking / stopPoseTracking / getCameraTextureId / startMp4Recording / stopMp4Recording
  *  - EventChannel  "phone_robot/arcore/pose"     : {x, y, heading}
  *  - EventChannel  "phone_robot/arcore/tracking" : 状態文字列
  *  - EventChannel  "phone_robot/depth"           : {ranges: [21本]}
@@ -31,7 +31,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
 
-        val ar = ArCoreManager(this)
+        val ar = ArCoreManager(this, flutterEngine.renderer)
         arCore = ar
         val se = SerialManager(this)
         serial = se
@@ -45,6 +45,11 @@ class MainActivity : FlutterActivity() {
                     ar.stop()
                     result.success(null)
                 }
+                "getCameraTextureId" -> result.success(ar.getCameraTextureId())
+                "startMp4Recording" -> result.success(
+                    ar.startMp4Recording(call.argument<String>("runId") ?: "")
+                )
+                "stopMp4Recording" -> result.success(ar.stopMp4Recording())
                 else -> result.notImplemented()
             }
         }

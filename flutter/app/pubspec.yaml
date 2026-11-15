@@ -1,7 +1,7 @@
 name: phone_robot_app
-description: phone-robot マッピングアプリ。シミュレーション／実機（ARCore＋ESP32）モード切替付き。地図が塗り上がり、タップでゴール指定できる。
+description: phone-robot マッピング＆ラジコンテストアプリ。歩いて障害物マップ測定／前後左右ラジコン＋録画保存。
 publish_to: 'none'
-version: 0.2.0
+version: 0.4.0+4
 
 environment:
   sdk: ^3.5.0

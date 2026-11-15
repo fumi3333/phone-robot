@@ -22,6 +22,15 @@ abstract class PoseSource {
   /// 'TRACKING' / 'PAUSED' / 'STOPPED' / 'UNSUPPORTED' / 'ERROR'。
   Stream<String> get trackingStates;
 
+  /// カメラ映像を表示するための Android SurfaceTexture ID。未対応時は null。
+  Future<int?> getCameraTextureId();
+
+  /// ARCore の MP4 同時録画を開始し、保存予定パスを返す。未対応時は null。
+  Future<String?> startMp4Recording(String runId);
+
+  /// ARCore の MP4 同時録画を停止し、保存済みファイルパスを返す。未録画時は null。
+  Future<String?> stopMp4Recording();
+
   Future<void> stop();
 }
 
@@ -31,10 +40,12 @@ abstract class PoseSource {
 /// 変換済みの {x, y, heading} を EventChannel で送る契約。
 class MethodChannelPoseSource implements PoseSource {
   static const MethodChannel _method = MethodChannel('phone_robot/arcore');
-  static const EventChannel _poseEvents =
-      EventChannel('phone_robot/arcore/pose');
-  static const EventChannel _trackingEvents =
-      EventChannel('phone_robot/arcore/tracking');
+  static const EventChannel _poseEvents = EventChannel(
+    'phone_robot/arcore/pose',
+  );
+  static const EventChannel _trackingEvents = EventChannel(
+    'phone_robot/arcore/tracking',
+  );
 
   Stream<Pose>? _poseStream;
   Stream<String>? _trackingStream;
@@ -44,7 +55,9 @@ class MethodChannelPoseSource implements PoseSource {
 
   @override
   Stream<Pose> get poses {
-    return _poseStream ??= _poseEvents.receiveBroadcastStream().map((dynamic e) {
+    return _poseStream ??= _poseEvents.receiveBroadcastStream().map((
+      dynamic e,
+    ) {
       final m = e as Map<dynamic, dynamic>;
       return Pose(
         (m['x'] as num).toDouble(),
@@ -56,9 +69,46 @@ class MethodChannelPoseSource implements PoseSource {
 
   @override
   Stream<String> get trackingStates {
-    return _trackingStream ??= _trackingEvents
-        .receiveBroadcastStream()
-        .map((dynamic e) => e.toString());
+    return _trackingStream ??= _trackingEvents.receiveBroadcastStream().map(
+      (dynamic e) => e.toString(),
+    );
+  }
+
+  @override
+  Future<int?> getCameraTextureId() async {
+    try {
+      final id = await _method.invokeMethod<int>('getCameraTextureId');
+      if (id == null || id < 0) return null;
+      return id;
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<String?> startMp4Recording(String runId) async {
+    try {
+      return await _method.invokeMethod<String>('startMp4Recording', {
+        'runId': runId,
+      });
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<String?> stopMp4Recording() async {
+    try {
+      return await _method.invokeMethod<String>('stopMp4Recording');
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 
   @override

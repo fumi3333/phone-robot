@@ -84,10 +84,9 @@ class StreamPump {
 
   void _tick() {
     poseFeed.addPose(pose);
-    feed.add(Scan(
-      pose,
-      Float32List.fromList(List.filled(21, double.infinity)),
-    ));
+    feed.add(
+      Scan(pose, Float32List.fromList(List.filled(21, double.infinity))),
+    );
   }
 
   void stop() => _timer?.cancel();
@@ -145,8 +144,7 @@ void main() {
     expect(link.sent, contains('s'));
   });
 
-  test('R1: 走行中に喪失→復帰したら replan を返し、その間は止まっている',
-      () async {
+  test('R1: 走行中に喪失→復帰したら replan を返し、その間は止まっている', () async {
     final link = FakeLink();
     final poseFeed = PoseFeed()..setTrackingState('TRACKING');
     final feed = ScanFeed();
@@ -226,8 +224,7 @@ void main() {
     }
   });
 
-  test('R3: 走行中にリンクが切れたら linkLost で止まり、地図に壁を書かない',
-      () async {
+  test('R3: 走行中にリンクが切れたら linkLost で止まり、地図に壁を書かない', () async {
     final link = FakeLink();
     final poseFeed = PoseFeed()..setTrackingState('TRACKING');
     final feed = ScanFeed();
@@ -260,8 +257,7 @@ void main() {
     }
   });
 
-  test('R3 対照: 健全なのに進めない（タイムアウト）場合は障害物を記録する',
-      () async {
+  test('R3 対照: 健全なのに進めない（タイムアウト）場合は障害物を記録する', () async {
     final link = FakeLink();
     final poseFeed = PoseFeed()..setTrackingState('TRACKING');
     final feed = ScanFeed();
@@ -279,7 +275,10 @@ void main() {
       expect(outcome, DriveOutcome.timeout);
       // 進行方向（+x、0.22 m 先）のセルが占有として記録される
       final ahead = cellOf(params, 1.22, 1.0);
-      expect(grid.logOdds[grid.index(ahead.r, ahead.c)], greaterThanOrEqualTo(2.0));
+      expect(
+        grid.logOdds[grid.index(ahead.r, ahead.c)],
+        greaterThanOrEqualTo(2.0),
+      );
     } finally {
       pump.stop();
     }
@@ -317,8 +316,7 @@ void main() {
     expect(SerialCommandScale.driveOf(-1.0), -255);
   });
 
-  test('パルス当て舵: 中誤差では 255 と 0 が交互に出力され drive は 140 以上を保つ',
-      () async {
+  test('連続フルステア: 中誤差でも 255 を維持してバネ戻りを防ぎ drive を抑える', () async {
     final link = FakeLink();
     final poseFeed = PoseFeed()..setTrackingState('TRACKING');
     final feed = ScanFeed();
@@ -330,7 +328,7 @@ void main() {
       grid: grid,
     );
     // ターゲットは (1.525, 1.025)。(1.0, 1.0) からはほぼ方位 0 rad。
-    // ロボット向きを -0.20 rad にして誤差 +0.20 rad（中誤差帯 0.09..0.38）を作る。
+    // ロボット向きを -0.20 rad にして誤差 +0.20 rad（中誤差帯）を作る。
     final pump = StreamPump(poseFeed, feed, Pose(1.0, 1.0, -0.20))..start();
     try {
       final future = driver.driveToWaypoint(target);
@@ -341,12 +339,21 @@ void main() {
 
       final cmds = link.sent.where((s) => s.startsWith('c,')).toList();
       expect(cmds.length, greaterThanOrEqualTo(2));
-      final steers = cmds.map((c) => int.parse(c.split(',')[2].trim())).toList();
-      final drives = cmds.map((c) => int.parse(c.split(',')[1].trim())).toList();
-      expect(steers, contains(255));
-      expect(steers, contains(0));
-      expect(drives.every((d) => d >= SerialCommandScale.minEffectiveDrivePwm),
-          isTrue);
+      final steers = cmds
+          .map((c) => int.parse(c.split(',')[2].trim()))
+          .toList();
+      final drives = cmds
+          .map((c) => int.parse(c.split(',')[1].trim()))
+          .toList();
+      expect(steers.every((s) => s == 255), isTrue);
+      expect(
+        drives.every(
+          (d) =>
+              d >= SerialCommandScale.minEffectiveDrivePwm &&
+              d <= SerialCommandScale.driveOf(0.38),
+        ),
+        isTrue,
+      );
     } finally {
       pump.stop();
     }
@@ -404,11 +411,13 @@ void main() {
     );
 
     // 右側 (i=0..6) は近い 0.45m、左側 (i=14..20, +12°..+30°) は 3.0m 開けている
-    var ranges = Float32List.fromList(List.generate(21, (i) {
-      if (i >= 14) return 3.0;
-      if (i >= 7) return 0.9;
-      return 0.45;
-    }));
+    var ranges = Float32List.fromList(
+      List.generate(21, (i) {
+        if (i >= 14) return 3.0;
+        if (i >= 7) return 0.9;
+        return 0.45;
+      }),
+    );
 
     final initPose = Pose(3.0, 2.5, math.pi / 2);
     poseFeed.addPose(initPose);
@@ -437,11 +446,13 @@ void main() {
       expect(hasLeftTurn, isTrue);
 
       // 今度は前方中央が 0.25m に詰まる（左は開いている）
-      ranges = Float32List.fromList(List.generate(21, (i) {
-        if (i >= 14) return 2.5;
-        if (i >= 7) return 0.25;
-        return 0.4;
-      }));
+      ranges = Float32List.fromList(
+        List.generate(21, (i) {
+          if (i >= 14) return 2.5;
+          if (i >= 7) return 0.25;
+          return 0.4;
+        }),
+      );
       await Future<void>.delayed(const Duration(milliseconds: 550));
       await driver.stop();
       await cruiseFuture;
@@ -449,7 +460,8 @@ void main() {
       final allCmds = link.sent.where((s) => s.startsWith('c,')).toList();
       final hasAvoidReverse = allCmds.any((c) {
         final parts = c.trim().split(',');
-        return int.parse(parts[1]) <= -SerialCommandScale.minEffectiveDrivePwm &&
+        return int.parse(parts[1]) <=
+                -SerialCommandScale.minEffectiveDrivePwm &&
             int.parse(parts[2]) == -255;
       });
       expect(hasAvoidReverse, isTrue);
