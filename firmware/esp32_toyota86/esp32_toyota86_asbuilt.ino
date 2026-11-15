@@ -40,11 +40,20 @@ const unsigned long TIMEOUT_MS = 400;
 unsigned long steerStartTime = 0;
 const unsigned long MAX_STEER_HOLD_MS = 600; // 0.6秒以上連続でハンドルを切り続けない
 
+// LEDC 出力ヘルパー: core 3.x の ledcWrite はピン番号、2.x はチャンネル番号を取る
+void pwmWrite(int pin, int ch, int duty) {
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+  ledcWrite(pin, duty);
+#else
+  ledcWrite(ch, duty);
+#endif
+}
+
 void emergencyStop() {
-  ledcWrite(CH_DRIVE1, 0);
-  ledcWrite(CH_DRIVE2, 0);
-  ledcWrite(CH_STEER1, 0);
-  ledcWrite(CH_STEER2, 0);
+  pwmWrite(PIN_DRIVE_IN1, CH_DRIVE1, 0);
+  pwmWrite(PIN_DRIVE_IN2, CH_DRIVE2, 0);
+  pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
+  pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
 }
 
 void setup() {
@@ -76,14 +85,14 @@ void setup() {
 void setDrive(int speed) {
   speed = constrain(speed, -MAX_DRIVE_PWM, MAX_DRIVE_PWM);
   if (speed > 0) {
-    ledcWrite(CH_DRIVE1, speed);
-    ledcWrite(CH_DRIVE2, 0);
+    pwmWrite(PIN_DRIVE_IN1, CH_DRIVE1, speed);
+    pwmWrite(PIN_DRIVE_IN2, CH_DRIVE2, 0);
   } else if (speed < 0) {
-    ledcWrite(CH_DRIVE1, 0);
-    ledcWrite(CH_DRIVE2, -speed);
+    pwmWrite(PIN_DRIVE_IN1, CH_DRIVE1, 0);
+    pwmWrite(PIN_DRIVE_IN2, CH_DRIVE2, -speed);
   } else {
-    ledcWrite(CH_DRIVE1, 0);
-    ledcWrite(CH_DRIVE2, 0);
+    pwmWrite(PIN_DRIVE_IN1, CH_DRIVE1, 0);
+    pwmWrite(PIN_DRIVE_IN2, CH_DRIVE2, 0);
   }
 }
 
@@ -102,14 +111,14 @@ void setSteer(int steer) {
   }
 
   if (steer < 0) {
-    ledcWrite(CH_STEER1, -steer);
-    ledcWrite(CH_STEER2, 0);
+    pwmWrite(PIN_STEER_IN3, CH_STEER1, -steer);
+    pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
   } else if (steer > 0) {
-    ledcWrite(CH_STEER1, 0);
-    ledcWrite(CH_STEER2, steer);
+    pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
+    pwmWrite(PIN_STEER_IN4, CH_STEER2, steer);
   } else {
-    ledcWrite(CH_STEER1, 0);
-    ledcWrite(CH_STEER2, 0);
+    pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
+    pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
   }
 }
 
