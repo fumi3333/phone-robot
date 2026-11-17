@@ -2,6 +2,7 @@ package dev.fumiproject.phone_robot_app
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
 import android.net.Uri
@@ -12,9 +13,11 @@ import android.opengl.EGLDisplay
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import android.view.Surface
 import androidx.core.app.ActivityCompat
@@ -76,6 +79,8 @@ class ArCoreManager(
         private const val POSE_INTERVAL_MS = 33L
         private const val PREVIEW_INTERVAL_MS = 100L
         private const val DEPTH_INTERVAL_MS = 120L
+        private const val THERMAL_PREVIEW_INTERVAL_MS = 250L
+        private const val THERMAL_DEPTH_INTERVAL_MS = 300L
         private const val FALLBACK_INTERVAL_MS = 1000L
         private const val PREVIEW_WIDTH = 640
         private const val PREVIEW_HEIGHT = 480
@@ -454,7 +459,9 @@ class ArCoreManager(
                 } catch (_: Exception) {
                     // テクスチャ更新失敗は次フレームで回復する
                 }
-                if (loopStart - lastPreviewAt >= PREVIEW_INTERVAL_MS) {
+                val previewInterval =
+                    if (isThermalThrottled(loopStart)) THERMAL_PREVIEW_INTERVAL_MS else PREVIEW_INTERVAL_MS
+                if (loopStart - lastPreviewAt >= previewInterval) {
                     lastPreviewAt = loopStart
                     previewBlitter.drawFrame(frame)
                 }
@@ -515,7 +522,9 @@ class ArCoreManager(
             }
         }
         if (depthSupported) {
-            if (now - lastDepthAt >= DEPTH_INTERVAL_MS) {
+            val depthInterval =
+                if (isThermalThrottled(now)) THERMAL_DEPTH_INTERVAL_MS else DEPTH_INTERVAL_MS
+            if (now - lastDepthAt >= depthInterval) {
                 lastDepthAt = now
                 val rays = computeRays(frame)
                 if (rays != null) {
@@ -527,6 +536,22 @@ class ArCoreManager(
             lastDepthAt = now
             pushDepth(DoubleArray(RAY_COUNT) { -1.0 })
         }
+    }
+
+    @Volatile private var lastThermalCheckAt = 0L
+    @Volatile private var thermalThrottled = false
+    private val powerManager: PowerManager? by lazy {
+        activity.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    }
+
+    private fun isThermalThrottled(nowMs: Long): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        if (nowMs - lastThermalCheckAt >= 2000L) {
+            lastThermalCheckAt = nowMs
+            val status = powerManager?.currentThermalStatus ?: PowerManager.THERMAL_STATUS_NONE
+            thermalThrottled = status >= PowerManager.THERMAL_STATUS_MODERATE
+        }
+        return thermalThrottled
     }
 
     // ------------------------------------------------------- 座標変換

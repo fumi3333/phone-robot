@@ -28,6 +28,12 @@ const int MAX_DRIVE_PWM = 255;
 unsigned long lastCmdTime = 0;
 const unsigned long TIMEOUT_MS = 400;
 
+// 車体電池電圧テレメトリ (OpenBot 互換: v,<mV>\n)
+// 分圧抵抗を接続したら PIN_BATTERY_ADC を 34 等に変更して有効化する (未接続時は -1)
+const int PIN_BATTERY_ADC = -1;
+const float BATTERY_DIVIDER_RATIO = 4.0f; // 例: 30kΩ + 10kΩ 分圧なら 4.0
+unsigned long lastBatteryTx = 0;
+
 // シリアル行受信バッファ
 char rxBuf[48];
 uint8_t rxLen = 0;
@@ -143,6 +149,14 @@ void loop() {
   // 2. フェイルセーフ監視 (通信途絶時は即停止)
   if (millis() - lastCmdTime > TIMEOUT_MS) {
     emergencyStop();
+  }
+
+  // 3. 車体電池電圧テレメトリ (分圧抵抗接続時のみ 500ms 周期で送信)
+  if (PIN_BATTERY_ADC >= 0 && millis() - lastBatteryTx >= 500) {
+    lastBatteryTx = millis();
+    int mv = (int)(analogReadMilliVolts(PIN_BATTERY_ADC) * BATTERY_DIVIDER_RATIO);
+    Serial.print("v,");
+    Serial.println(mv);
   }
 
   delay(5);

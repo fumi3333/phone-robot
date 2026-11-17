@@ -109,12 +109,14 @@ class RealSession {
   bool recordMp4 = false;
   bool frontBrakeEnabled = true;
   bool frontBrakeActive = false;
+  double? vehicleBatteryV;
   String driveWebhookUrl = '';
   String? lastSavedRunId;
   String lastSaveStatus = '未保存';
   int? cameraTextureId;
 
   DateTime? _sensorsStartedAt;
+  DateTime? _lastCloseWallAt;
   Timer? _watchdog;
 
   final _updates = StreamController<void>.broadcast();
@@ -122,6 +124,8 @@ class RealSession {
 
   final List<StreamSubscription<dynamic>> _subs = [];
   StreamSubscription<Esp32LinkState>? _linkSub;
+  StreamSubscription<String>? _rxSub;
+  String _rxBuf = '';
   Timer? _notifyTimer;
 
   String? _activeManualDir;
@@ -137,8 +141,12 @@ class RealSession {
     };
     _linkSub = link.states.listen((s) {
       linkState = s;
+      if (s == Esp32LinkState.disconnected) {
+        vehicleBatteryV = null;
+      }
       _notify();
     });
+    _rxSub = link.received.listen(ingestSerialTelemetry);
     link.onCommandSent = (drive, steer) {
       _recorder?.recordCommand(
         drive,
@@ -305,6 +313,10 @@ class RealSession {
     _subs.add(
       poseSource.trackingStates.listen((s) {
         poseFeed.setTrackingState(s);
+        if (sensorsOn && (s == 'PAUSED' || s == 'STOPPED')) {
+          status =
+              'ARCore ロスト ($s): カメラを床の模様やドア・家具に向けてゆっくり動かしてください';
+        }
         _notify();
       }),
     );
@@ -421,6 +433,23 @@ class RealSession {
     return ok;
   }
 
+  void ingestSerialTelemetry(String chunk) {
+    _rxBuf += chunk;
+    while (true) {
+      final idx = _rxBuf.indexOf('\n');
+      if (idx < 0) break;
+      final line = _rxBuf.substring(0, idx).trim();
+      _rxBuf = _rxBuf.substring(idx + 1);
+      if (line.startsWith('v,')) {
+        final mv = int.tryParse(line.substring(2).trim());
+        if (mv != null && mv > 0 && mv < 20000) {
+          vehicleBatteryV = mv / 1000.0;
+          _notify();
+        }
+      }
+    }
+  }
+
   void _onIncomingScan(Scan scan) {
     feed.add(scan);
     if (!driver.isBusy) {
@@ -429,25 +458,38 @@ class RealSession {
     if (_recorder != null) {
       _recorder!.recordScan(scan, trackingState: trackingState);
     }
+    final frontMin = RunRecorder.frontMinDepthM(scan);
+    if (frontMin != null && frontMin < 0.70) {
+      _lastCloseWallAt = DateTime.now();
+    } else if (frontMin != null && frontMin >= frontResumeDistM) {
+      _lastCloseWallAt = null;
+    }
     if (frontBrakeEnabled &&
         (_activeManualDir == 'f' ||
             _activeManualDir == 'l' ||
             _activeManualDir == 'r')) {
-      final frontMin = RunRecorder.frontMinDepthM(scan);
+      final lostCloseWall =
+          frontMin == null &&
+          _lastCloseWallAt != null &&
+          DateTime.now().difference(_lastCloseWallAt!) <=
+              const Duration(milliseconds: 1500);
       final shouldStop =
-          frontMin != null &&
-          (frontMin < frontStopDistM ||
-              (frontBrakeActive && frontMin < frontResumeDistM));
+          lostCloseWall ||
+          (frontMin != null &&
+              (frontMin < frontStopDistM ||
+                  (frontBrakeActive && frontMin < frontResumeDistM)));
       if (shouldStop) {
         if (!frontBrakeActive) {
           frontBrakeActive = true;
           _manualHoldEpoch++;
           unawaited(link.sendJog('s'));
         }
-        status =
-            '前方ブレーキ作動: 壁まで ${frontMin.toStringAsFixed(2)} m（後退は可能）';
+        status = lostCloseWall
+            ? '前方ブレーキ作動: 至近距離のため自動停止（後退は可能）'
+            : '前方ブレーキ作動: 壁まで ${frontMin.toStringAsFixed(2)} m（後退は可能）';
       } else if (frontBrakeActive &&
-          (frontMin == null || frontMin >= frontResumeDistM)) {
+          frontMin != null &&
+          frontMin >= frontResumeDistM) {
         frontBrakeActive = false;
       }
     }
@@ -799,6 +841,14 @@ class RealSession {
     final scan = latestScan;
     final frontMin = scan == null ? null : RunRecorder.frontMinDepthM(scan);
     if (frontMin == null) {
+      final lostCloseWall =
+          _lastCloseWallAt != null &&
+          DateTime.now().difference(_lastCloseWallAt!) <=
+              const Duration(milliseconds: 1500);
+      if (lostCloseWall) {
+        frontBrakeActive = true;
+        return 0;
+      }
       frontBrakeActive = false;
       return requestedPwm;
     }
@@ -886,6 +936,7 @@ class RealSession {
     unawaited(KeepAwake.setEnabled(false));
     _notifyTimer?.cancel();
     _linkSub?.cancel();
+    _rxSub?.cancel();
     for (final s in _subs) {
       s.cancel();
     }

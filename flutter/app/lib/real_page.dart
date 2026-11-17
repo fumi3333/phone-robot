@@ -1104,9 +1104,15 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
 
   Widget _buildRcPanel({required EdgeInsetsGeometry padding}) {
     final connected = _session.linkState == Esp32LinkState.connected;
+    final battV = _session.vehicleBatteryV;
+    final battSuffix = battV == null
+        ? ''
+        : (battV < 7.0
+              ? ' | ⚠️電池 ${battV.toStringAsFixed(1)}V'
+              : ' | 電池 ${battV.toStringAsFixed(1)}V');
     final linkText = switch (_session.linkState) {
       Esp32LinkState.connected =>
-        '🔌 ESP32 接続済み (${_session.link.lastCommand})',
+        '🔌 ESP32 接続済み (${_session.link.lastCommand})$battSuffix',
       Esp32LinkState.connecting => '🔌 ESP32 接続中…',
       Esp32LinkState.error => '🔌 ESP32 接続エラー',
       Esp32LinkState.disconnected => '🔌 ESP32 未接続',

@@ -362,4 +362,39 @@ void main() {
 
     session.dispose();
   });
+
+  test('ToF至近距離抜けフェイルセーフ: 直前に0.70m未満の壁があり急にnullになったら安全停止', () async {
+    final session = RealSession();
+    session.setSpeedNorm(1.0);
+
+    Scan scanAt(double? frontM) {
+      final ranges = Float32List(21)..fillRange(0, 21, 2.5);
+      for (var i = 7; i <= 13; i++) {
+        ranges[i] = frontM ?? double.nan;
+      }
+      return Scan(Pose(3.0, 2.5, math.pi / 2), ranges);
+    }
+
+    // 0.55m で壁を認識した直後に、至近距離(15cm未満)/黒面で計測不能(null)になった場合
+    session.recordScanForTest(scanAt(0.55));
+    session.recordScanForTest(scanAt(null));
+    await session.jog('f');
+    expect(session.frontBrakeActive, isTrue);
+    expect(serialCalls.last.arguments['text'], 's');
+
+    session.dispose();
+  });
+
+  test('OpenBot互換電圧テレメトリ: v,<mV> の受信で vehicleBatteryV を更新する', () {
+    final session = RealSession();
+    expect(session.vehicleBatteryV, isNull);
+
+    session.ingestSerialTelemetry('v,78');
+    expect(session.vehicleBatteryV, isNull); // 改行前は保留
+
+    session.ingestSerialTelemetry('50\nv,6800\n');
+    expect(session.vehicleBatteryV, closeTo(6.8, 1e-6));
+
+    session.dispose();
+  });
 }
