@@ -484,7 +484,7 @@ class RealSession {
           _manualHoldEpoch++;
           unawaited(link.sendJog('s'));
         }
-        status = lostCloseWall
+        status = lostCloseWall || frontMin == null
             ? '前方ブレーキ作動: 至近距離のため自動停止（後退は可能）'
             : '前方ブレーキ作動: 壁まで ${frontMin.toStringAsFixed(2)} m（後退は可能）';
       } else if (frontBrakeActive &&
