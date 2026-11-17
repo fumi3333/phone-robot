@@ -352,7 +352,7 @@ void main() {
     expect(serialCalls.last.arguments['text'], 's');
 
     await session.jog('b');
-    expect(serialCalls.last.arguments['text'], 'c,-255,0');
+    expect(serialCalls.last.arguments['text'], 'c,-255,0\n');
 
     // 4. 0.70m（0.60m以上）: ブレーキ解除され前進再開
     session.recordScanForTest(scanAt(0.70));
