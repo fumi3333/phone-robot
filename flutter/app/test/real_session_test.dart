@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_robot_app/platform/keep_awake.dart';
+import 'package:phone_robot_app/platform/serial_link.dart';
 import 'package:phone_robot_app/real/real_session.dart';
 import 'package:phone_robot_core/phone_robot_core.dart';
 
