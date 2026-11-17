@@ -368,9 +368,12 @@ void main() {
     session.setSpeedNorm(1.0);
 
     Scan scanAt(double? frontM) {
-      final ranges = Float32List(21)..fillRange(0, 21, 2.5);
-      for (var i = 7; i <= 13; i++) {
-        ranges[i] = frontM ?? double.nan;
+      final ranges = Float32List(21)
+        ..fillRange(0, 21, frontM == null ? double.nan : 2.5);
+      if (frontM != null) {
+        for (var i = 6; i <= 15; i++) {
+          ranges[i] = frontM;
+        }
       }
       return Scan(Pose(3.0, 2.5, math.pi / 2), ranges);
     }
