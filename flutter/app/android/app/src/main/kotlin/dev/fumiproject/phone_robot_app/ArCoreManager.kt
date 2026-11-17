@@ -74,8 +74,8 @@ class ArCoreManager(
         private const val RAY_COUNT = 21
         private const val FRAME_INTERVAL_MS = 33L
         private const val POSE_INTERVAL_MS = 33L
-        private const val PREVIEW_INTERVAL_MS = 66L
-        private const val DEPTH_INTERVAL_MS = 150L
+        private const val PREVIEW_INTERVAL_MS = 100L
+        private const val DEPTH_INTERVAL_MS = 120L
         private const val FALLBACK_INTERVAL_MS = 1000L
         private const val PREVIEW_WIDTH = 640
         private const val PREVIEW_HEIGHT = 480
@@ -689,9 +689,9 @@ class ArCoreManager(
                             }
                         }
                     }
-                    u += 2
+                    u += 3
                 }
-                v += 2
+                v += 3
             }
 
             for (i in 0 until RAY_COUNT) {

@@ -234,6 +234,7 @@ void main() {
 
   test('走行記録でコマンド効果CSV・JSON・MDを生成し停止時は自動でドライブを開かない', () async {
     final session = RealSession();
+    session.setRecordMp4(true);
     session.startRecording(mode: 'manual');
     expect(session.isRecording, isTrue);
 
@@ -310,6 +311,53 @@ void main() {
     final shared = await session.saveAndShareToDrive();
     expect(shared, isTrue);
     expect(storageCalls.any((c) => c.method == 'shareRunToDrive'), isTrue);
+
+    session.dispose();
+  });
+
+  test('前方安全ブレーキ: 85cm以内で減速、45cm未満で停止し後退は許可、60cm以上で再開', () async {
+    final session = RealSession();
+    session.setSpeedNorm(1.0); // PWM 255
+    expect(session.frontBrakeEnabled, isTrue);
+    expect(session.recordMp4, isFalse);
+
+    Scan scanAt(double frontM) {
+      final ranges = Float32List(21)..fillRange(0, 21, 2.5);
+      for (var i = 7; i <= 13; i++) {
+        ranges[i] = frontM;
+      }
+      return Scan(Pose(3.0, 2.5, math.pi / 2), ranges);
+    }
+
+    // 1. 0.70m（減速帯 0.45..0.85m）: フル 255 より減速した値で前進
+    session.recordScanForTest(scanAt(0.70));
+    await session.jog('f');
+    expect(session.frontBrakeActive, isFalse);
+    final slowCmd = serialCalls.last.arguments['text'] as String;
+    expect(slowCmd.startsWith('c,'), isTrue);
+    final slowPwm = int.parse(slowCmd.split(',')[1]);
+    expect(slowPwm, greaterThanOrEqualTo(SerialCommandScale.minEffectiveDrivePwm));
+    expect(slowPwm, lessThan(255));
+
+    // 2. 0.40m（45cm未満）: 強制停止 's' が送られ、frontBrakeActive = true
+    session.recordScanForTest(scanAt(0.40));
+    expect(session.frontBrakeActive, isTrue);
+    expect(serialCalls.last.arguments['text'], 's');
+
+    // 3. 0.52m（ヒステリシス帯 0.45..0.60m）: まだ前進は禁止だが後退 'b' は許可
+    session.recordScanForTest(scanAt(0.52));
+    await session.jog('f');
+    expect(session.frontBrakeActive, isTrue);
+    expect(serialCalls.last.arguments['text'], 's');
+
+    await session.jog('b');
+    expect(serialCalls.last.arguments['text'], 'c,-255,0');
+
+    // 4. 0.70m（0.60m以上）: ブレーキ解除され前進再開
+    session.recordScanForTest(scanAt(0.70));
+    await session.jog('f');
+    expect(session.frontBrakeActive, isFalse);
+    expect((serialCalls.last.arguments['text'] as String).startsWith('c,'), isTrue);
 
     session.dispose();
   });

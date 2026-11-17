@@ -1,16 +1,10 @@
-// 2026-11-15 as-built 版
-// A=前ステアリング、B=後ろ駆動の実物配線に合わせ、駆動とステアリングの割り当てを入れ替え済み。
-// 他は元のファームと同一。
+// 2026-11-16 as-built v2 版
+// - A=前ステアリング(GPIO16/17)、B=後ろ駆動(GPIO18/19)
+// - シリアル受信を行バッファ方式にして途中切れ・取りこぼしを解消
+// - ステアリングは LEDC PWM ではなく digitalWrite(HIGH/LOW) の完全直流 100% 出力に変更
 
 /**
- * ジョーゼン 1/16 トヨタ86 (JRVC015-RD) 自動運転ファームウェア v2.1 (ESP32完全対応版)
- *
- * 【重要修正】
- * 1. ESP32で安全に使える GPIO 16, 17, 18, 19 にピンを再配置 (GPIO 6-11のSPIフラッシュ衝突を回避)
- * 2. ESP32のハードウェアPWM (LEDC) を使用
- * 3. 電源分離対応: ESP32はスマホのUSB-Cから給電、モーターはラジコンの単3×6本から給電 (GND共通)
- * 4. 速度リミッター: 室内安全のため最大速度を PWM 160 に制限
- * 5. 通信途絶時の自動緊急ブレーキ (400ms Watchdog)
+ * ジョーゼン 1/16 トヨタ86 (JRVC015-RD) 自動運転ファームウェア v2.2 (as-built)
  */
 
 #include <Arduino.h>
@@ -21,24 +15,22 @@ const int PIN_DRIVE_IN2 = 19; // 走行 後退 (ドライバ IN4 に接続)
 const int PIN_STEER_IN3 = 16; // 操舵 左折 (ドライバ IN1 に接続)
 const int PIN_STEER_IN4 = 17; // 操舵 右折 (ドライバ IN2 に接続)
 
-// --- PWM 設定 (ESP32 LEDC) ---
+// --- PWM 設定 (走行用 LEDC) ---
 const int PWM_FREQ = 1000;    // 1kHz
 const int PWM_RES  = 8;       // 8bit (0 - 255)
 const int CH_DRIVE1 = 0;
 const int CH_DRIVE2 = 1;
-const int CH_STEER1 = 2;
-const int CH_STEER2 = 3;
 
-// 室内走行用 安全スピード上限 (リミッター解除: 最大255フルパワー)
+// 室内走行用 安全スピード上限 (最大255フルパワー)
 const int MAX_DRIVE_PWM = 255;
 
 // 通信途絶監視タイマー
 unsigned long lastCmdTime = 0;
 const unsigned long TIMEOUT_MS = 400;
 
-// ステアリング過熱保護 (トイラジコンの振り切りステアリングを過熱から守る)
-unsigned long steerStartTime = 0;
-const unsigned long MAX_STEER_HOLD_MS = 1000; // 1.0秒連続でハンドルを切ったら保持トルクへ移行
+// シリアル行受信バッファ
+char rxBuf[48];
+uint8_t rxLen = 0;
 
 // LEDC 出力ヘルパー: core 3.x の ledcWrite はピン番号、2.x はチャンネル番号を取る
 void pwmWrite(int pin, int ch, int duty) {
@@ -52,33 +44,31 @@ void pwmWrite(int pin, int ch, int duty) {
 void emergencyStop() {
   pwmWrite(PIN_DRIVE_IN1, CH_DRIVE1, 0);
   pwmWrite(PIN_DRIVE_IN2, CH_DRIVE2, 0);
-  pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
-  pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
+  digitalWrite(PIN_STEER_IN3, LOW);
+  digitalWrite(PIN_STEER_IN4, LOW);
 }
 
 void setup() {
   Serial.begin(115200);
-  Serial.setTimeout(15); // パース待機を15msに短縮 (1000msブロッキングによるウォッチドッグ誤作動を防止)
+  Serial.setTimeout(15);
 
-  // LEDC チャンネル設定 (ESP32 core 2.x/3.x 互換)
+  // 走行モーター: LEDC PWM
   #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
     ledcAttach(PIN_DRIVE_IN1, PWM_FREQ, PWM_RES);
     ledcAttach(PIN_DRIVE_IN2, PWM_FREQ, PWM_RES);
-    ledcAttach(PIN_STEER_IN3, PWM_FREQ, PWM_RES);
-    ledcAttach(PIN_STEER_IN4, PWM_FREQ, PWM_RES);
   #else
     ledcSetup(CH_DRIVE1, PWM_FREQ, PWM_RES);
     ledcSetup(CH_DRIVE2, PWM_FREQ, PWM_RES);
-    ledcSetup(CH_STEER1, PWM_FREQ, PWM_RES);
-    ledcSetup(CH_STEER2, PWM_FREQ, PWM_RES);
     ledcAttachPin(PIN_DRIVE_IN1, CH_DRIVE1);
     ledcAttachPin(PIN_DRIVE_IN2, CH_DRIVE2);
-    ledcAttachPin(PIN_STEER_IN3, CH_STEER1);
-    ledcAttachPin(PIN_STEER_IN4, CH_STEER2);
   #endif
 
+  // 操舵モーター: 完全直流 100% 出力 (digitalWrite)
+  pinMode(PIN_STEER_IN3, OUTPUT);
+  pinMode(PIN_STEER_IN4, OUTPUT);
+
   emergencyStop();
-  Serial.println("TOYOTA86_ESP32_LEDC_ONLINE");
+  Serial.println("TOYOTA86_ESP32_ASBUILT_V2_ONLINE");
 }
 
 // 走行モーター制御 (speed: -255 〜 +255)
@@ -97,46 +87,56 @@ void setDrive(int speed) {
 }
 
 // 操舵モーター制御 (steer: 負=左, 正=右, 0=中立)
-// トイラジコンの振り切りステアリングは純正プロポ同様、手加減なしの直流100%全開でバネを押し切る
+// トイラジコンの振り切りステアリングは純正プロポ同様、完全直流100% (HIGH/LOW) でバネを押し切る
 void setSteer(int steer) {
   if (steer < 0) {
-    pwmWrite(PIN_STEER_IN3, CH_STEER1, 255); // 左 100% 直流フルパワー
-    pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
+    digitalWrite(PIN_STEER_IN3, HIGH); // 左 100% 直流フルパワー
+    digitalWrite(PIN_STEER_IN4, LOW);
   } else if (steer > 0) {
-    pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
-    pwmWrite(PIN_STEER_IN4, CH_STEER2, 255); // 右 100% 直流フルパワー
+    digitalWrite(PIN_STEER_IN3, LOW);
+    digitalWrite(PIN_STEER_IN4, HIGH); // 右 100% 直流フルパワー
   } else {
-    pwmWrite(PIN_STEER_IN3, CH_STEER1, 0);
-    pwmWrite(PIN_STEER_IN4, CH_STEER2, 0);
+    digitalWrite(PIN_STEER_IN3, LOW);
+    digitalWrite(PIN_STEER_IN4, LOW);
+  }
+}
+
+void handleLine(const char* line) {
+  lastCmdTime = millis();
+  if (line[0] == 'c' && line[1] == ',') {
+    int drive = 0;
+    int steer = 0;
+    if (sscanf(line + 2, "%d,%d", &drive, &steer) == 2) {
+      setDrive(drive);
+      setSteer(steer);
+    }
+    return;
+  }
+  switch (line[0]) {
+    case 'f': setDrive(150); setSteer(0); break;
+    case 'b': setDrive(-140); setSteer(0); break;
+    case 'l': setDrive(140); setSteer(-230); break;
+    case 'r': setDrive(140); setSteer(230); break;
+    case 's': emergencyStop(); break;
   }
 }
 
 void loop() {
-  // 1. コマンド受信処理
-  if (Serial.available() > 0) {
-    char c = Serial.peek();
-    lastCmdTime = millis();
-
-    // フォーマット: "c,drive,steer\n" 例: "c,150,-100\n"
-    if (c == 'c') {
-      Serial.read(); // 'c'
-      if (Serial.read() == ',') {
-        int drive = Serial.parseInt();
-        int steer = Serial.parseInt();
-        setDrive(drive);
-        setSteer(steer);
-        while (Serial.available() && Serial.read() != '\n'); // flush
+  // 1. 改行まで1行溜めてから確実にパースする
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      if (rxLen > 0) {
+        rxBuf[rxLen] = '\0';
+        handleLine(rxBuf);
+        rxLen = 0;
       }
+    } else if (rxLen < sizeof(rxBuf) - 1) {
+      rxBuf[rxLen++] = ch;
     } else {
-      // 1文字テスト用コマンド (PCシリアルモニタ等)
-      char cmd = Serial.read();
-      switch (cmd) {
-        case 'f': setDrive(150); setSteer(0); break;     // 前進 (安全速度)
-        case 'b': setDrive(-140); setSteer(0); break;    // 後退
-        case 'l': setDrive(140); setSteer(-230); break;  // 前進左折
-        case 'r': setDrive(140); setSteer(230); break;   // 前進右折
-        case 's': emergencyStop(); break;                // 停止
-      }
+      // バッファ溢れ時は破棄してリセット
+      rxLen = 0;
     }
   }
 

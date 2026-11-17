@@ -47,6 +47,10 @@ class SerialManager(private val context: Context) {
 
     @Volatile private var port: UsbSerialPort? = null
     @Volatile private var ioManager: SerialInputOutputManager? = null
+    @Volatile private var txRunning = false
+    private var txThread: Thread? = null
+    private val txLock = Object()
+    private var pendingPayload: ByteArray? = null
     private var stateSink: EventChannel.EventSink? = null
     private var rxSink: EventChannel.EventSink? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -188,6 +192,7 @@ class SerialManager(private val context: Context) {
             })
             ioManager = io
             Executors.newSingleThreadExecutor().submit(io)
+            startTxThread()
             pushState("connected")
             true
         } catch (e: Exception) {
@@ -197,18 +202,63 @@ class SerialManager(private val context: Context) {
         }
     }
 
-    fun send(text: String): Boolean {
-        val p = port ?: return false
-        return try {
-            p.write(text.toByteArray(Charsets.UTF_8), 500)
-            true
-        } catch (e: Exception) {
-            Log.w(TAG, "write failed: ${e.message}")
-            false
+    private fun startTxThread() {
+        stopTxThread()
+        txRunning = true
+        val t = Thread({
+            while (txRunning) {
+                var payload: ByteArray?
+                synchronized(txLock) {
+                    while (txRunning && pendingPayload == null) {
+                        try {
+                            txLock.wait()
+                        } catch (_: InterruptedException) {
+                            return@Thread
+                        }
+                    }
+                    payload = pendingPayload
+                    pendingPayload = null
+                }
+                val bytes = payload ?: continue
+                val p = port ?: continue
+                try {
+                    // UI スレッドをブロックせず最新指令だけを送る（遅延・キュー詰まり防止）
+                    p.write(bytes, 150)
+                } catch (e: Exception) {
+                    Log.w(TAG, "write failed: ${e.message}")
+                }
+            }
+        }, "SerialTxThread")
+        t.isDaemon = true
+        t.start()
+        txThread = t
+    }
+
+    private fun stopTxThread() {
+        txRunning = false
+        synchronized(txLock) {
+            pendingPayload = null
+            txLock.notifyAll()
         }
+        try {
+            txThread?.interrupt()
+        } catch (_: Exception) {
+        }
+        txThread = null
+    }
+
+    fun send(text: String): Boolean {
+        if (port == null) return false
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        synchronized(txLock) {
+            pendingPayload = bytes
+            txLock.notifyAll()
+        }
+        return true
     }
 
     fun disconnect() {
+        stopTxThread()
         try {
             ioManager?.stop()
         } catch (e: Exception) {

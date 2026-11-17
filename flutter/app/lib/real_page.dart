@@ -268,6 +268,30 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                       ),
                       SwitchListTile(
                         dense: true,
+                        title: const Text('前方安全ブレーキ（45cm で自動停止）'),
+                        subtitle: const Text(
+                          '85cm 以内で自動減速、45cm 未満で前進を停止します（後退は可）',
+                        ),
+                        value: _session.frontBrakeEnabled,
+                        onChanged: (v) {
+                          _session.setFrontBrakeEnabled(v);
+                          refresh();
+                        },
+                      ),
+                      SwitchListTile(
+                        dense: true,
+                        title: const Text('MP4 動画も同時録画（電池消費大）'),
+                        subtitle: const Text(
+                          '通常は OFF 推奨。必要なときだけ ON にしてください',
+                        ),
+                        value: _session.recordMp4,
+                        onChanged: (v) {
+                          _session.setRecordMp4(v);
+                          refresh();
+                        },
+                      ),
+                      SwitchListTile(
+                        dense: true,
                         title: const Text('操舵反転（左右モーター極性入れ替え）'),
                         value: _session.invertSteer,
                         onChanged: (v) {
@@ -1210,6 +1234,38 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                   });
                 },
               ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              FilterChip(
+                key: const Key('front_brake_chip'),
+                visualDensity: VisualDensity.compact,
+                selected: _session.frontBrakeEnabled,
+                onSelected: (v) => _session.setFrontBrakeEnabled(v),
+                label: Text(
+                  _session.frontBrakeEnabled
+                      ? '🛡 前方ブレーキ ON (45cm停止)'
+                      : '🛡 前方ブレーキ OFF',
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ),
+              if (_session.frontBrakeActive) ...[
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    '壁の手前で停止中（後退可）',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFFDC2626),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 4),

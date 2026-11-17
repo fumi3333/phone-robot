@@ -99,8 +99,16 @@ class RealSession {
   bool get isRecording => _recorder != null;
   int get recordedRowCount => _recorder?.rowCount ?? 0;
 
+  /// 前方安全ブレーキのしきい値（メートル）とヒステリシス設定。
+  static const double frontStopDistM = 0.45;
+  static const double frontResumeDistM = 0.60;
+  static const double frontSlowDistM = 0.85;
+
   /// 記録終了時に Google ドライブへ自動送信／共有画面を開くか。
   bool autoDriveSync = true;
+  bool recordMp4 = false;
+  bool frontBrakeEnabled = true;
+  bool frontBrakeActive = false;
   String driveWebhookUrl = '';
   String? lastSavedRunId;
   String lastSaveStatus = '未保存';
@@ -168,6 +176,19 @@ class RealSession {
 
   void setInvertSteer(bool value) {
     driver.invertSteer = value;
+    _notify();
+  }
+
+  void setFrontBrakeEnabled(bool value) {
+    frontBrakeEnabled = value;
+    if (!value) {
+      frontBrakeActive = false;
+    }
+    _notify();
+  }
+
+  void setRecordMp4(bool value) {
+    recordMp4 = value;
     _notify();
   }
 
@@ -408,6 +429,28 @@ class RealSession {
     if (_recorder != null) {
       _recorder!.recordScan(scan, trackingState: trackingState);
     }
+    if (frontBrakeEnabled &&
+        (_activeManualDir == 'f' ||
+            _activeManualDir == 'l' ||
+            _activeManualDir == 'r')) {
+      final frontMin = RunRecorder.frontMinDepthM(scan);
+      final shouldStop =
+          frontMin != null &&
+          (frontMin < frontStopDistM ||
+              (frontBrakeActive && frontMin < frontResumeDistM));
+      if (shouldStop) {
+        if (!frontBrakeActive) {
+          frontBrakeActive = true;
+          _manualHoldEpoch++;
+          unawaited(link.sendJog('s'));
+        }
+        status =
+            '前方ブレーキ作動: 壁まで ${frontMin.toStringAsFixed(2)} m（後退は可能）';
+      } else if (frontBrakeActive &&
+          (frontMin == null || frontMin >= frontResumeDistM)) {
+        frontBrakeActive = false;
+      }
+    }
     _notify();
   }
 
@@ -506,7 +549,9 @@ class RealSession {
   void startRecording({String mode = 'manual'}) {
     final rec = RunRecorder(mode: mode);
     _recorder = rec;
-    unawaited(poseSource.startMp4Recording(rec.runId));
+    if (recordMp4) {
+      unawaited(poseSource.startMp4Recording(rec.runId));
+    }
     _notify();
   }
 
@@ -746,6 +791,36 @@ class RealSession {
     _notify();
   }
 
+  int _evaluateFrontDrivePwm(int requestedPwm) {
+    if (!frontBrakeEnabled) {
+      frontBrakeActive = false;
+      return requestedPwm;
+    }
+    final scan = latestScan;
+    final frontMin = scan == null ? null : RunRecorder.frontMinDepthM(scan);
+    if (frontMin == null) {
+      frontBrakeActive = false;
+      return requestedPwm;
+    }
+    if (frontMin < frontStopDistM ||
+        (frontBrakeActive && frontMin < frontResumeDistM)) {
+      frontBrakeActive = true;
+      return 0;
+    }
+    frontBrakeActive = false;
+    if (frontMin < frontSlowDistM) {
+      final ratio =
+          ((frontMin - frontStopDistM) / (frontSlowDistM - frontStopDistM))
+              .clamp(0.0, 1.0);
+      final minPwm = SerialCommandScale.minEffectiveDrivePwm;
+      if (requestedPwm <= minPwm) return requestedPwm;
+      return (minPwm + ratio * (requestedPwm - minPwm))
+          .round()
+          .clamp(minPwm, requestedPwm);
+    }
+    return requestedPwm;
+  }
+
   Future<void> jog(String ch) async {
     final pwm = currentDrivePwm;
     final leftSteer = invertSteer ? 255 : -255;
@@ -760,7 +835,12 @@ class RealSession {
         _manualHoldEpoch++;
         _activeManualDir = 'f';
         _preSteerReady = false;
-        await link.sendDriveSteer(pwm, 0);
+        final safePwm = _evaluateFrontDrivePwm(pwm);
+        if (safePwm == 0) {
+          await link.sendJog('s');
+        } else {
+          await link.sendDriveSteer(safePwm, 0);
+        }
       case 'b':
         _manualHoldEpoch++;
         _activeManualDir = 'b';
@@ -769,8 +849,13 @@ class RealSession {
       case 'l':
       case 'r':
         final steer = ch == 'l' ? leftSteer : rightSteer;
-        final turnPwm = pwm.clamp(152, 178);
-        if (_activeManualDir != ch) {
+        final turnPwm = _evaluateFrontDrivePwm(pwm.clamp(152, 178));
+        if (turnPwm == 0) {
+          _manualHoldEpoch++;
+          _activeManualDir = ch;
+          _preSteerReady = false;
+          await link.sendJog('s');
+        } else if (_activeManualDir != ch) {
           final epoch = ++_manualHoldEpoch;
           _activeManualDir = ch;
           _preSteerReady = false;
@@ -779,8 +864,13 @@ class RealSession {
           _notify();
           await Future<void>.delayed(const Duration(milliseconds: 150));
           if (epoch != _manualHoldEpoch) return;
+          final recheckedPwm = _evaluateFrontDrivePwm(pwm.clamp(152, 178));
+          if (recheckedPwm == 0) {
+            await link.sendJog('s');
+            return;
+          }
           _preSteerReady = true;
-          await link.sendDriveSteer(turnPwm, steer);
+          await link.sendDriveSteer(recheckedPwm, steer);
         } else if (_preSteerReady) {
           await link.sendDriveSteer(turnPwm, steer);
         }
