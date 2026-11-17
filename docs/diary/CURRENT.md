@@ -1,6 +1,6 @@
 # 現在の正（CURRENT）
 
-最終更新: 2026-11-16
+最終更新: 2026-11-18
 ここに書いてあることが「今の状態」。日記と食い違ったらこちらが正。
 2026-11-15 に、それ以前の記述（L298N 前提・未組み立て）を全面差し替えした。
 
@@ -14,7 +14,7 @@
 ## リポジトリと公開の状態
 
 - GitHub: https://github.com/fumi3333/phone-robot （public、MIT）
-- 最新リリース v0.5.0 を公開準備中（v0.4.0 は CI でテスト 20 件通過・APK ビルド・リリース公開済み。v0.5.0 で実機 Google ドライブデータ解析に基づく抜本修正を反映）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
+- 最新リリース v0.6.0 を公開済み（CI で全 25 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
 - Zenn 記事3本を公開済み。記事3は Zennfes Autumn 2026「物理デバイスを使った開発」に応募済み（締切 2026-12-16）。
 
 ## ハードの状態（2026-11-15 時点）
@@ -65,6 +65,11 @@
   - `ArCoreManager.kt`: `relativePose` と `computeRays` を重力整合 3D 逆射影方式へ刷新。縦持ち・自動回転ロック・下向き傾け時でも床誤検知や軸ズレを起こさず水平 ±30° の障害物を抽出する。
   - `map_painter.dart` / `real_session.dart` / `real_page.dart`: カメラ視野角（±30°、1.5m）の青い扇形ガイド、上部バナーの「左 / 正面 / 右」距離（m）表示、設定シート内「▶ 部屋マップのデモ表示（動作確認）」を追加。
   - `test/drive_data_replay_test.dart`: ドライブ実測データのリプレイ自動テストを追加。
+- 2026-11-18 v0.6.0 ラグ解消・軽量化・前方安全ブレーキ実装（`58ea9b6` / `0a448d0`）:
+  - `SerialManager.kt`: USB シリアル送信を専用バックグラウンドスレッド＋最新指令上書き方式へ変更し、UI スレッドのブロックと 3 秒ラグを解消。
+  - `ArCoreManager.kt`: ToF 計算を `u+=3, v+=3`（1/9 の計算量）へ間引き、`PREVIEW_INTERVAL_MS` を `100ms` へ緩和。
+  - `real_session.dart` / `real_page.dart`: MP4 同時録画をデフォルト OFF に変更（設定で ON 可）し、前方安全ブレーキ（85cm 以内で減速、45cm 未満で停止、60cm 以上で再開、後退は常時許可、深度到着時の即時停止あり）を追加。
+  - `esp32_toyota86_asbuilt.ino`（v2.2）: シリアル受信を行バッファ方式へ変更、ステア（`GPIO16/17`）を `digitalWrite` 完全直流 100% 出力へ変更し、`COM7` へ書き込み・ベリファイ済み（ステアは単3電池充電後の再テスト待ち）。
 - 実機リスクの一覧は docs/note10plus-risks.md。R5（深度の視野角が近似値）は自宅で 1m 実測の較正が必要。
 
 ## 未確認のこと
