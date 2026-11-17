@@ -14,7 +14,7 @@
 ## リポジトリと公開の状態
 
 - GitHub: https://github.com/fumi3333/phone-robot （public、MIT）
-- 最新リリース v0.6.0 を公開済み（CI で全 25 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
+- 最新リリース v0.7.0 を公開済み（CI で全 27 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
 - Zenn 記事3本を公開済み。記事3は Zennfes Autumn 2026「物理デバイスを使った開発」に応募済み（締切 2026-12-16）。
 
 ## ハードの状態（2026-11-15 時点）
@@ -70,6 +70,10 @@
   - `ArCoreManager.kt`: ToF 計算を `u+=3, v+=3`（1/9 の計算量）へ間引き、`PREVIEW_INTERVAL_MS` を `100ms` へ緩和。
   - `real_session.dart` / `real_page.dart`: MP4 同時録画をデフォルト OFF に変更（設定で ON 可）し、前方安全ブレーキ（85cm 以内で減速、45cm 未満で停止、60cm 以上で再開、後退は常時許可、深度到着時の即時停止あり）を追加。
   - `esp32_toyota86_asbuilt.ino`（v2.2）: シリアル受信を行バッファ方式へ変更、ステア（`GPIO16/17`）を `digitalWrite` 完全直流 100% 出力へ変更し、`COM7` へ書き込み・ベリファイ済み（ステアは単3電池充電後の再テスト待ち）。
+- 2026-11-18 v0.7.0 先人の知見を取り込んだ安定化・保護機能を追加（`ea8cc41`）:
+  - `ArCoreManager.kt`: Android `PowerManager` のサーマル状態監視を追加し、`MODERATE` 以上で深度間隔を 300ms、プレビューを 250ms へ自動緩和。
+  - `real_session.dart`: ToF 至近距離抜け（0.70m 未満の壁の直後に正面 `null` 化）での安全停止フェイルセーフ、白い壁での `PAUSED`/`STOPPED` 時の復帰案内、OpenBot 互換の電圧テレメトリ受信（`v,<mV>`）を追加。
+  - `real_page.dart` / `esp32_toyota86_asbuilt.ino`: 電圧テレメトリ受信時の `電池 X.XV` 表示（7.0V 未満で警告）とファーム側 `PIN_BATTERY_ADC` 送信枠を追加。
 - 実機リスクの一覧は docs/note10plus-risks.md。R5（深度の視野角が近似値）は自宅で 1m 実測の較正が必要。
 
 ## 未確認のこと
