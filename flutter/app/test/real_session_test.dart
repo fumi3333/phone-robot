@@ -388,7 +388,7 @@ void main() {
     session.dispose();
   });
 
-  test('OpenBot互換電圧テレメトリ: v,<mV> の受信で vehicleBatteryV を更新する', () {
+  test('OpenBot互換電圧テレメトリ: v,<mV> と v<V> の両形式の受信で vehicleBatteryV を更新する', () {
     final session = RealSession();
     expect(session.vehicleBatteryV, isNull);
 
@@ -397,6 +397,9 @@ void main() {
 
     session.ingestSerialTelemetry('50\nv,6800\n');
     expect(session.vehicleBatteryV, closeTo(6.8, 1e-6));
+
+    session.ingestSerialTelemetry('v8.42\n');
+    expect(session.vehicleBatteryV, closeTo(8.42, 1e-6));
 
     session.dispose();
   });

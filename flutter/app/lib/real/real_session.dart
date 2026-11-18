@@ -446,6 +446,17 @@ class RealSession {
           vehicleBatteryV = mv / 1000.0;
           _notify();
         }
+      } else if (line.startsWith('v') && line.length > 1) {
+        final val = double.tryParse(line.substring(1).trim());
+        if (val != null && val > 0) {
+          if (val >= 100.0 && val < 20000.0) {
+            vehicleBatteryV = val / 1000.0;
+            _notify();
+          } else if (val < 20.0) {
+            vehicleBatteryV = val;
+            _notify();
+          }
+        }
       }
     }
   }

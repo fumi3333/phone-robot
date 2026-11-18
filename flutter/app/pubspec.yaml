@@ -1,7 +1,7 @@
 name: phone_robot_app
 description: phone-robot マッピング＆ラジコンテストアプリ。歩いて障害物マップ測定／前後左右ラジコン＋録画保存。
 publish_to: 'none'
-version: 0.7.0+8
+version: 0.7.1+9
 
 environment:
   sdk: ^3.5.0

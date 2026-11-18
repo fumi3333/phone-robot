@@ -521,7 +521,7 @@ class ArCoreManager(
                 pushPose(x, y, heading)
             }
         }
-        if (depthSupported) {
+        if (depthSupported && camera.trackingState == TrackingState.TRACKING) {
             val depthInterval =
                 if (isThermalThrottled(now)) THERMAL_DEPTH_INTERVAL_MS else DEPTH_INTERVAL_MS
             if (now - lastDepthAt >= depthInterval) {
@@ -531,7 +531,7 @@ class ArCoreManager(
                     pushDepth(rays)
                 }
             }
-        } else if (now - lastDepthAt >= FALLBACK_INTERVAL_MS) {
+        } else if (!depthSupported && now - lastDepthAt >= FALLBACK_INTERVAL_MS) {
             // Depth 非対応環境のフォールバック: 常に「計測なし」（SPEC §5.2）
             lastDepthAt = now
             pushDepth(DoubleArray(RAY_COUNT) { -1.0 })
