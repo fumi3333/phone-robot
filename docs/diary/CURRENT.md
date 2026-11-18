@@ -14,7 +14,7 @@
 ## リポジトリと公開の状態
 
 - GitHub: https://github.com/fumi3333/phone-robot （public、MIT）
-- 最新リリース v0.7.0 を公開済み（CI で全 27 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
+- 最新リリース v0.7.1 を公開済み（CI で全 27 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
 - Zenn 記事3本を公開済み。記事3は Zennfes Autumn 2026「物理デバイスを使った開発」に応募済み（締切 2026-12-16）。
 
 ## ハードの状態（2026-11-15 時点）
@@ -74,6 +74,9 @@
   - `ArCoreManager.kt`: Android `PowerManager` のサーマル状態監視を追加し、`MODERATE` 以上で深度間隔を 300ms、プレビューを 250ms へ自動緩和。
   - `real_session.dart`: ToF 至近距離抜け（0.70m 未満の壁の直後に正面 `null` 化）での安全停止フェイルセーフ、白い壁での `PAUSED`/`STOPPED` 時の復帰案内、OpenBot 互換の電圧テレメトリ受信（`v,<mV>`）を追加。
   - `real_page.dart` / `esp32_toyota86_asbuilt.ino`: 電圧テレメトリ受信時の `電池 X.XV` 表示（7.0V 未満で警告）とファーム側 `PIN_BATTERY_ADC` 送信枠を追加。
+- 2026-11-18 v0.7.1 一次情報（OpenBot `openbot.ino` / Google ARCore 公式仕様）の調査結果を反映（`a2a386b`）:
+  - `ArCoreManager.kt`: `camera.trackingState == TrackingState.TRACKING` のときだけ `computeRays()` を呼ぶようにし、トラッキング喪失中の `NotTrackingException` 例外負荷を回避（Depth 非対応フォールバックは `!depthSupported` で維持）。
+  - `real_session.dart`: `ingestSerialTelemetry` を拡張し、従来の `v,<mV>` に加えて OpenBot 本家形式の小数V（`v8.42`）も受信・パース可能にした。
 - 実機リスクの一覧は docs/note10plus-risks.md。R5（深度の視野角が近似値）は自宅で 1m 実測の較正が必要。
 
 ## 未確認のこと
