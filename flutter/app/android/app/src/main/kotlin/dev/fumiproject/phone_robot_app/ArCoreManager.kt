@@ -694,13 +694,13 @@ class ArCoreManager(
                                 if (dForward > 0.12) {
                                     val dLeft = wx * basis.leftX + wz * basis.leftZ
                                     val horizDist = hypot(dForward, dLeft)
-                                    if (horizDist >= 0.15 &&
+                                    if (horizDist >= 0.20 &&
                                         horizDist <= 5.0 &&
-                                        wy >= -0.20 &&
+                                        wy >= -0.10 &&
                                         wy <= 0.50
                                     ) {
                                         val elevSlope = wy / horizDist
-                                        if (elevSlope >= -0.15 && elevSlope <= 0.35) {
+                                        if (elevSlope >= -0.05 && elevSlope <= 0.35) {
                                             val angleDeg = Math.toDegrees(atan2(dLeft, dForward))
                                             if (angleDeg >= -31.5 && angleDeg <= 31.5) {
                                                 val bin = ((angleDeg + 31.5) / 3.0)

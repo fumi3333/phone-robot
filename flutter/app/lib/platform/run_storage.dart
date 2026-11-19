@@ -209,14 +209,17 @@ class RunRecorder {
     final n = scan.ranges.length;
     final cStart = (n * 0.33).floor();
     final cEnd = (n * 0.67).ceil().clamp(cStart, n - 1);
-    var minVal = double.infinity;
+    final vals = <double>[];
     for (var i = cStart; i <= cEnd; i++) {
       final r = scan.ranges[i];
-      if (r.isFinite && r > 0 && r < minVal) {
-        minVal = r;
+      if (r.isFinite && r > 0) {
+        vals.add(r);
       }
     }
-    return minVal.isFinite ? minVal : null;
+    if (vals.isEmpty) return null;
+    vals.sort();
+    // 1本だけの反射スパイクや床ノイズによる誤停止を防ぐため、2番目に近い値を採用する
+    return vals.length >= 2 ? vals[1] : vals[0];
   }
 
   static double _wrapDegDiff(double radDiff) {

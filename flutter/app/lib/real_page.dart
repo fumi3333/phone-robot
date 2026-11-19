@@ -840,8 +840,8 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               key: const Key('stage_signal_frame'),
               decoration: BoxDecoration(
                 color: isDanger
-                    ? signalColor.withValues(alpha: 0.16)
-                    : signalColor.withValues(alpha: 0.06),
+                    ? signalColor.withAlpha(41)
+                    : signalColor.withAlpha(15),
                 border: Border.all(
                   color: signalColor,
                   width: isDanger ? 7.0 : 5.0,
@@ -1542,9 +1542,43 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 onSelected: (v) => _session.setFrontBrakeEnabled(v),
                 label: Text(
                   _session.frontBrakeEnabled
-                      ? '🛡 前方ブレーキ ON (45cm停止)'
+                      ? '🛡 前方ブレーキ ON (25cm停止)'
                       : '🛡 前方ブレーキ OFF',
                   style: const TextStyle(fontSize: 11),
+                ),
+              ),
+              const SizedBox(width: 6),
+              OutlinedButton(
+                key: const Key('auto_drive_btn'),
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  minimumSize: const Size(0, 32),
+                  backgroundColor: _session.busy
+                      ? const Color(0xFFDC2626)
+                      : const Color(0xFF111827),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                onPressed: () async {
+                  if (_session.busy) {
+                    _stopJog(sendStop: false);
+                    await _session.emergencyStop();
+                    return;
+                  }
+                  if (!_session.sensorsOn) {
+                    await _session.startSensors();
+                  }
+                  if (_session.linkState != Esp32LinkState.connected) {
+                    await _session.connectSerial();
+                  }
+                  unawaited(_session.runAutoCruise());
+                },
+                child: Text(
+                  _session.busy ? '⏹ 自動停止' : '🤖 自動運転',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
                 ),
               ),
               if (_session.frontBrakeActive) ...[

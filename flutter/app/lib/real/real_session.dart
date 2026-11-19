@@ -105,9 +105,9 @@ class RealSession {
   int get recordedRowCount => _recorder?.rowCount ?? 0;
 
   /// 前方安全ブレーキのしきい値（メートル）とヒステリシス設定。
-  static const double frontStopDistM = 0.45;
-  static const double frontResumeDistM = 0.60;
-  static const double frontSlowDistM = 0.85;
+  static const double frontStopDistM = 0.25;
+  static const double frontResumeDistM = 0.35;
+  static const double frontSlowDistM = 0.55;
 
   /// 記録終了時に Google ドライブへ自動送信／共有画面を開くか。
   bool autoDriveSync = true;
@@ -251,7 +251,7 @@ class RealSession {
         message: 'カメラで前方を計測中…',
       );
     }
-    if (frontMin < 0.35) {
+    if (frontMin < 0.25) {
       return ObstacleAlert(
         severity: ObstacleSeverity.danger,
         frontMinM: frontMin,
@@ -260,7 +260,7 @@ class RealSession {
         message: '🚨 目の前に障害物を感知！ (${frontMin.toStringAsFixed(2)} m)',
       );
     }
-    if (frontMin < 0.80) {
+    if (frontMin < 0.55) {
       final hasSide = leftClear != null || rightClear != null;
       final openSide = (leftClear ?? 0) >= (rightClear ?? 0) ? '左' : '右';
       return ObstacleAlert(
