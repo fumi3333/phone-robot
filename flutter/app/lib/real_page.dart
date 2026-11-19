@@ -1533,7 +1533,10 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
             ],
           ),
           const SizedBox(height: 4),
-          Row(
+          Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               FilterChip(
                 key: const Key('front_brake_chip'),
@@ -1542,12 +1545,11 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 onSelected: (v) => _session.setFrontBrakeEnabled(v),
                 label: Text(
                   _session.frontBrakeEnabled
-                      ? '🛡 前方ブレーキ ON (25cm停止)'
-                      : '🛡 前方ブレーキ OFF',
+                      ? '🛡 ブレーキ ON (25cm)'
+                      : '🛡 ブレーキ OFF',
                   style: const TextStyle(fontSize: 11),
                 ),
               ),
-              const SizedBox(width: 6),
               OutlinedButton(
                 key: const Key('auto_drive_btn'),
                 style: OutlinedButton.styleFrom(
@@ -1581,21 +1583,15 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                   style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
                 ),
               ),
-              if (_session.frontBrakeActive) ...[
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    '壁の手前で停止中（後退可）',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFFDC2626),
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+              if (_session.frontBrakeActive)
+                const Text(
+                  '壁の手前で停止中（後退可）',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFFDC2626),
                   ),
                 ),
-              ],
             ],
           ),
           const SizedBox(height: 4),
