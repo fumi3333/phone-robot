@@ -40,9 +40,9 @@ void main() {
     try {
       await tester.pumpWidget(MaterialApp(home: RealPage(session: session)));
 
-      // 初期モード: ① 歩いてマップ測定（ESP32 ボタンは表示されない）
-      expect(find.text('① 歩いてマップ測定'), findsOneWidget);
-      expect(find.text('② ラジコン操縦'), findsOneWidget);
+      // 初期モード: マップ測定（ESP32 ボタンは表示されない）
+      expect(find.text('マップ測定'), findsOneWidget);
+      expect(find.text('ラジコン'), findsOneWidget);
       expect(find.byKey(const Key('sensor_power_btn')), findsOneWidget);
       expect(find.byKey(const Key('recenter_map_btn')), findsOneWidget);
       expect(find.byKey(const Key('record_toggle_btn')), findsOneWidget);
@@ -60,7 +60,7 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 60));
 
-      expect(find.textContaining('目の前に障害物を感知'), findsOneWidget);
+      expect(find.textContaining('障害物を感知'), findsOneWidget);
 
       // ② ラジコン操縦モードへ切替
       await tester.tap(find.byKey(const Key('mode_rc')));

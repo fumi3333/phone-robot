@@ -347,7 +347,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                         ],
                       ),
                       const Divider(height: 12),
-                      FilledButton.icon(
+                      FilledButton(
                         key: const Key('check_update_btn'),
                         onPressed: _checkingUpdate
                             ? null
@@ -355,8 +355,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                                 Navigator.of(ctx).pop();
                                 unawaited(_checkAndApplyUpdate());
                               },
-                        icon: const Icon(Icons.system_update, size: 18),
-                        label: Text('🔄 アプリを更新（現在 v$_appVersion）'),
+                        child: Text('アプリ更新 (現在 v$_appVersion)'),
                       ),
                       const SizedBox(height: 6),
                       SwitchListTile(
@@ -468,7 +467,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                         ],
                       ),
                       const SizedBox(height: 10),
-                      FilledButton.tonalIcon(
+                      FilledButton.tonal(
                         key: const Key('demo_preview_btn'),
                         onPressed: _session.busy
                             ? null
@@ -480,8 +479,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                                   _followRobot = true;
                                 });
                               },
-                        icon: const Icon(Icons.play_arrow, size: 18),
-                        label: const Text('▶ 部屋マップのデモ表示（動作確認）'),
+                        child: const Text('デモマップ表示'),
                       ),
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
@@ -579,11 +577,11 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               segments: const [
                 ButtonSegment(
                   value: _WorkMode.walkScan,
-                  label: Text('① 歩いてマップ測定', key: Key('mode_walk')),
+                  label: Text('マップ測定', key: Key('mode_walk')),
                 ),
                 ButtonSegment(
                   value: _WorkMode.rcControl,
-                  label: Text('② ラジコン操縦', key: Key('mode_rc')),
+                  label: Text('ラジコン', key: Key('mode_rc')),
                 ),
               ],
               selected: {_workMode},
@@ -626,7 +624,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               ),
             ),
             child: Text(
-              _session.sensorsOn ? '📷 ON' : '📷 OFF',
+              _session.sensorsOn ? 'センサー ON' : 'センサー OFF',
               style: TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
@@ -650,8 +648,12 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               ),
             ),
             child: const Text(
-              '⚙ 設定',
-              style: TextStyle(fontSize: 12, color: Color(0xFF111827)),
+              '設定',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF111827),
+              ),
             ),
           ),
         ],
@@ -822,11 +824,11 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
             ObstacleSeverity.unknown => null,
           };
     final String? signalText = isDanger
-        ? '⛔ いけない'
+        ? '停止 (壁)'
         : switch (alert.severity) {
-            ObstacleSeverity.clear => '✅ いける',
-            ObstacleSeverity.caution => '⚠️ ちゅうい',
-            ObstacleSeverity.danger => '⛔ いけない',
+            ObstacleSeverity.clear => '進行可',
+            ObstacleSeverity.caution => '注意',
+            ObstacleSeverity.danger => '停止 (壁)',
             ObstacleSeverity.unknown => null,
           };
 
@@ -1026,8 +1028,8 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               fit: BoxFit.scaleDown,
               child: Text(
                 rec
-                    ? '⏹ 記録を止めて保存 (${_session.recordedRowCount}件)'
-                    : '🔴 カメラ＋マップ記録 開始',
+                    ? '記録停止 (${_session.recordedRowCount}件)'
+                    : '記録開始',
                 style: const TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
@@ -1055,7 +1057,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
             child: const FittedBox(
               fit: BoxFit.scaleDown,
               child: Text(
-                '☁ ドライブへ送る',
+                'ドライブ送信',
                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
               ),
             ),
@@ -1123,7 +1125,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 onPressed: _session.isRecording || _session.busy
                     ? null
                     : _session.resetMap,
-                child: const Text('🗑 マップ消去', style: TextStyle(fontSize: 12)),
+                child: const Text('消去', style: TextStyle(fontSize: 12)),
               ),
             ],
           ),
@@ -1398,14 +1400,14 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     final battSuffix = battV == null
         ? ''
         : (battV < 7.0
-              ? ' | ⚠️電池 ${battV.toStringAsFixed(1)}V'
+              ? ' | 電池低下 ${battV.toStringAsFixed(1)}V'
               : ' | 電池 ${battV.toStringAsFixed(1)}V');
     final linkText = switch (_session.linkState) {
       Esp32LinkState.connected =>
-        '🔌 ESP32 接続済み (${_session.link.lastCommand})$battSuffix',
-      Esp32LinkState.connecting => '🔌 ESP32 接続中…',
-      Esp32LinkState.error => '🔌 ESP32 接続エラー',
-      Esp32LinkState.disconnected => '🔌 ESP32 未接続',
+        'ESP32 接続済み (${_session.link.lastCommand})$battSuffix',
+      Esp32LinkState.connecting => 'ESP32 接続中…',
+      Esp32LinkState.error => 'ESP32 接続エラー',
+      Esp32LinkState.disconnected => 'ESP32 未接続',
     };
 
     return Padding(
@@ -1545,9 +1547,9 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 onSelected: (v) => _session.setFrontBrakeEnabled(v),
                 label: Text(
                   _session.frontBrakeEnabled
-                      ? '🛡 ブレーキ ON (25cm)'
-                      : '🛡 ブレーキ OFF',
-                  style: const TextStyle(fontSize: 11),
+                      ? '壁停止 ON (25cm)'
+                      : '壁停止 OFF',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
                 ),
               ),
               OutlinedButton(
@@ -1579,7 +1581,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                   unawaited(_session.runAutoCruise());
                 },
                 child: Text(
-                  _session.busy ? '⏹ 自動停止' : '🤖 自動運転',
+                  _session.busy ? '自動停止' : '自動運転',
                   style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
                 ),
               ),

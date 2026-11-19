@@ -226,7 +226,7 @@ void main() {
     );
     expect(session.grid.knownCount, greaterThan(0));
     expect(session.obstacleAlert.severity, ObstacleSeverity.danger);
-    expect(session.obstacleAlert.message, contains('目の前に障害物を感知'));
+    expect(session.obstacleAlert.message, contains('障害物を感知'));
 
     session.resetMap();
     expect(session.grid.knownCount, 0);

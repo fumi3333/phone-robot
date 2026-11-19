@@ -257,7 +257,7 @@ class RealSession {
         frontMinM: frontMin,
         leftClearM: leftClear,
         rightClearM: rightClear,
-        message: '🚨 目の前に障害物を感知！ (${frontMin.toStringAsFixed(2)} m)',
+        message: '障害物を感知 (${frontMin.toStringAsFixed(2)} m)',
       );
     }
     if (frontMin < 0.55) {
@@ -269,8 +269,8 @@ class RealSession {
         leftClearM: leftClear,
         rightClearM: rightClear,
         message: hasSide
-            ? '⚠️ 前方に障害物あり (${frontMin.toStringAsFixed(2)} m) — $openSide側が空いています'
-            : '⚠️ 前方に障害物あり (${frontMin.toStringAsFixed(2)} m)',
+            ? '前方注意 (${frontMin.toStringAsFixed(2)} m) / $openSide側が空き'
+            : '前方注意 (${frontMin.toStringAsFixed(2)} m)',
       );
     }
     return ObstacleAlert(
@@ -278,7 +278,7 @@ class RealSession {
       frontMinM: frontMin,
       leftClearM: leftClear,
       rightClearM: rightClear,
-      message: '✅ 前方クリア (${frontMin.toStringAsFixed(2)} m)',
+      message: '進行可 (${frontMin.toStringAsFixed(2)} m)',
     );
   }
 
