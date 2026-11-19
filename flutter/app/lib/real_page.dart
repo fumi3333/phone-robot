@@ -38,8 +38,11 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
   Offset? _lastFocalPoint;
   bool _cameraMain = false;
   bool _autoStartSensors = false;
-  String _appVersion = '0.8.0';
+  String _appVersion = '0.9.0';
   bool _checkingUpdate = false;
+  String? _availableUpdateVersion;
+  String? _availableApkUrl;
+  bool _downloadingUpdate = false;
   _WorkMode _workMode = _WorkMode.walkScan;
   _RcInputType _rcInputType = _RcInputType.buttons;
 
@@ -80,8 +83,51 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
       if (_autoStartSensors && !_session.sensorsOn) {
         unawaited(_session.autoSetup());
       }
+      unawaited(_silentCheckUpdate());
     } catch (_) {
       // テスト環境等で未実装の場合は起動 OFF のまま
+    }
+  }
+
+  Future<void> _silentCheckUpdate() async {
+    try {
+      final res = await _systemChannel.invokeMapMethod<String, dynamic>('checkUpdate');
+      if (!mounted || res == null || res['ok'] != true) return;
+      if (res['hasUpdate'] == true) {
+        final latest = res['latestVersion']?.toString();
+        final apkUrl = res['apkUrl']?.toString();
+        if (latest != null && apkUrl != null && apkUrl.isNotEmpty) {
+          setState(() {
+            _availableUpdateVersion = latest;
+            _availableApkUrl = apkUrl;
+          });
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _installUpdateDirect(String apkUrl) async {
+    if (_downloadingUpdate) return;
+    setState(() => _downloadingUpdate = true);
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('APK をダウンロード中… しばらくお待ちください')),
+        );
+      }
+      final dl = await _systemChannel.invokeMapMethod<String, dynamic>(
+        'downloadAndInstallApk',
+        {'url': apkUrl},
+      );
+      if (!mounted) return;
+      if (dl == null || dl['ok'] != true) {
+        final err = dl?['error'] ?? 'ダウンロード失敗';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('更新に失敗しました: $err')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _downloadingUpdate = false);
     }
   }
 
@@ -1547,7 +1593,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 onSelected: (v) => _session.setFrontBrakeEnabled(v),
                 label: Text(
                   _session.frontBrakeEnabled
-                      ? '壁停止 ON (25cm)'
+                      ? '壁停止 ON (35cm)'
                       : '壁停止 OFF',
                   style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
                 ),
@@ -1618,6 +1664,42 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
         child: Column(
           children: [
             _buildHeaderBar(),
+            if (_availableUpdateVersion != null && _availableApkUrl != null)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                color: const Color(0xFF1E293B),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '新版 v$_availableUpdateVersion あり',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        minimumSize: const Size(0, 28),
+                        backgroundColor: Colors.white,
+                        foregroundColor: const Color(0xFF111827),
+                      ),
+                      onPressed: _downloadingUpdate
+                          ? null
+                          : () => unawaited(_installUpdateDirect(_availableApkUrl!)),
+                      child: Text(
+                        _downloadingUpdate ? '取得中...' : '更新',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             _buildObstacleBanner(),
             Expanded(
               child: LayoutBuilder(
