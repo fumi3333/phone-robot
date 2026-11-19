@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'map_painter.dart';
 import 'platform/serial_link.dart';
@@ -27,9 +28,18 @@ class RealPage extends StatefulWidget {
 }
 
 class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
+  static const MethodChannel _systemChannel = MethodChannel('phone_robot/system');
+
   bool _floorScale = false;
   bool _followRobot = true;
-  bool _cameraMain = true;
+  double _mapViewRadiusM = 2.5;
+  Offset? _cameraCenterWorld;
+  double _scaleStartRadiusM = 2.5;
+  Offset? _lastFocalPoint;
+  bool _cameraMain = false;
+  bool _autoStartSensors = false;
+  String _appVersion = '0.8.0';
+  bool _checkingUpdate = false;
   _WorkMode _workMode = _WorkMode.walkScan;
   _RcInputType _rcInputType = _RcInputType.buttons;
 
@@ -53,7 +63,25 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
       });
     } else {
       _ownsSession = true;
-      _initSession(autoStart: true);
+      _initSession(autoStart: false);
+      unawaited(_loadAppPrefs());
+    }
+  }
+
+  Future<void> _loadAppPrefs() async {
+    try {
+      final ver = await _systemChannel.invokeMethod<String>('getVersionName');
+      final auto = await _systemChannel.invokeMethod<bool>('getAutoStartSensors');
+      if (!mounted) return;
+      setState(() {
+        if (ver != null && ver.isNotEmpty) _appVersion = ver;
+        _autoStartSensors = auto ?? false;
+      });
+      if (_autoStartSensors && !_session.sensorsOn) {
+        unawaited(_session.autoSetup());
+      }
+    } catch (_) {
+      // テスト環境等で未実装の場合は起動 OFF のまま
     }
   }
 
@@ -136,9 +164,78 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
       params: _session.params,
       robotPose: _session.latestPose,
       followRobot: _followRobot,
+      viewRadiusM: _mapViewRadiusM,
+      cameraCenterWorld: _cameraCenterWorld,
     );
     if (cell != null) {
       _session.selectGoal(cell);
+    }
+  }
+
+  Future<void> _checkAndApplyUpdate() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    try {
+      final res = await _systemChannel.invokeMapMethod<String, dynamic>('checkUpdate');
+      if (!mounted) return;
+      if (res == null || res['ok'] != true) {
+        final err = res?['error'] ?? '通信エラー';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('更新確認に失敗しました ($err)')),
+        );
+        return;
+      }
+      final hasUpdate = res['hasUpdate'] == true;
+      final latest = res['latestVersion']?.toString() ?? '';
+      final apkUrl = res['apkUrl']?.toString() ?? '';
+      if (!hasUpdate || apkUrl.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('最新バージョンです (v$_appVersion)')),
+        );
+        return;
+      }
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('アップデート v$latest'),
+          content: Text(
+            '新しいバージョン (v$latest) が公開されています。\n現在: v$_appVersion\n\nこのままダウンロードしてインストール画面を開きますか？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('あとで'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('更新する'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('APK をダウンロード中… しばらくお待ちください')),
+      );
+      final dl = await _systemChannel.invokeMapMethod<String, dynamic>(
+        'downloadAndInstallApk',
+        {'url': apkUrl},
+      );
+      if (!mounted) return;
+      if (dl == null || dl['ok'] != true) {
+        final err = dl?['error'] ?? 'ダウンロード失敗';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('更新に失敗しました: $err')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('更新エラー: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
     }
   }
 
@@ -250,6 +347,33 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                         ],
                       ),
                       const Divider(height: 12),
+                      FilledButton.icon(
+                        key: const Key('check_update_btn'),
+                        onPressed: _checkingUpdate
+                            ? null
+                            : () {
+                                Navigator.of(ctx).pop();
+                                unawaited(_checkAndApplyUpdate());
+                              },
+                        icon: const Icon(Icons.system_update, size: 18),
+                        label: Text('🔄 アプリを更新（現在 v$_appVersion）'),
+                      ),
+                      const SizedBox(height: 6),
+                      SwitchListTile(
+                        dense: true,
+                        title: const Text('アプリ起動時にセンサーを自動開始'),
+                        subtitle: const Text(
+                          'OFF（推奨）にすると起動直後の電池消費を抑えます',
+                        ),
+                        value: _autoStartSensors,
+                        onChanged: (v) async {
+                          setState(() => _autoStartSensors = v);
+                          try {
+                            await _systemChannel.invokeMethod('setAutoStartSensors', {'on': v});
+                          } catch (_) {}
+                          refresh();
+                        },
+                      ),
                       SwitchListTile(
                         dense: true,
                         title: const Text('ARCore センサー'),
@@ -475,6 +599,45 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
           ),
           const SizedBox(width: 6),
           OutlinedButton(
+            key: const Key('sensor_power_btn'),
+            onPressed: _session.busy
+                ? null
+                : () async {
+                    if (_session.sensorsOn) {
+                      await _session.stopSensors();
+                    } else {
+                      await _session.startSensors();
+                    }
+                  },
+            style: OutlinedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              minimumSize: const Size(0, 34),
+              backgroundColor: _session.sensorsOn
+                  ? const Color(0xFFECFDF5)
+                  : const Color(0xFFF3F4F6),
+              side: BorderSide(
+                color: _session.sensorsOn
+                    ? const Color(0xFF10B981)
+                    : const Color(0xFFD1D5DB),
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: Text(
+              _session.sensorsOn ? '📷 ON' : '📷 OFF',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: _session.sensorsOn
+                    ? const Color(0xFF065F46)
+                    : const Color(0xFF4B5563),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          OutlinedButton(
             key: const Key('settings_btn'),
             onPressed: _openSettingsSheet,
             style: OutlinedButton.styleFrom(
@@ -589,7 +752,38 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
         return GestureDetector(
+          behavior: HitTestBehavior.opaque,
           onTapDown: (d) => _onTapMap(d, size),
+          onScaleStart: (details) {
+            _scaleStartRadiusM = _mapViewRadiusM;
+            _lastFocalPoint = details.localFocalPoint;
+          },
+          onScaleUpdate: (details) {
+            if (size.width <= 0 || size.height <= 0) return;
+            final nextRadius = (_scaleStartRadiusM / details.scale).clamp(0.8, 10.0);
+            final prevFocal = _lastFocalPoint ?? details.localFocalPoint;
+            final delta = details.localFocalPoint - prevFocal;
+            _lastFocalPoint = details.localFocalPoint;
+
+            final pxPerM = math.min(size.width, size.height) / (2.0 * nextRadius);
+            if (delta.distance > 1.0 || (details.scale - 1.0).abs() > 0.02) {
+              setState(() {
+                _mapViewRadiusM = nextRadius;
+                if (delta.distance > 1.0) {
+                  final rp = _session.latestPose;
+                  final base = _cameraCenterWorld ??
+                      (rp != null
+                          ? Offset(rp.x, rp.y)
+                          : Offset(params.roomW / 2.0, params.roomH / 2.0));
+                  _followRobot = false;
+                  _cameraCenterWorld = Offset(
+                    (base.dx - delta.dx / pxPerM).clamp(0.0, params.roomW),
+                    (base.dy + delta.dy / pxPerM).clamp(0.0, params.roomH),
+                  );
+                }
+              });
+            }
+          },
           child: CustomPaint(
             size: size,
             painter: MapPainter(
@@ -605,6 +799,8 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
               targetDistM: _session.hudTargetDistM,
               mappingParams: params,
               followRobot: _followRobot,
+              viewRadiusM: _mapViewRadiusM,
+              cameraCenterWorld: _cameraCenterWorld,
             ),
           ),
         );
@@ -632,28 +828,61 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
             child: Text(
               _cameraMain
                   ? 'カメラ映像（ARCore ${_session.trackingState}）'
-                  : (_followRobot ? '障害物マップ（自分中心・赤=壁）' : '障害物マップ（全体図）'),
+                  : (_followRobot
+                        ? 'マップ（現在地追従 / 半径 ${_mapViewRadiusM.toStringAsFixed(1)}m）'
+                        : 'マップ（フリー操作 / 半径 ${_mapViewRadiusM.toStringAsFixed(1)}m）'),
               style: const TextStyle(color: Colors.white, fontSize: 11),
             ),
           ),
         ),
-        if (!_cameraMain || !_followRobot)
+        if (!_cameraMain)
           Positioned(
-            top: 8,
-            right: 8,
-            child: GestureDetector(
-              onTap: () => setState(() => _followRobot = !_followRobot),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xCC111827),
-                  borderRadius: BorderRadius.circular(6),
+            left: 10,
+            bottom: 10,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FloatingActionButton.small(
+                  heroTag: 'recenter_fab',
+                  key: const Key('recenter_map_btn'),
+                  backgroundColor: _followRobot ? const Color(0xFF1A73E8) : Colors.white,
+                  foregroundColor: _followRobot ? Colors.white : const Color(0xFF1A73E8),
+                  tooltip: '現在地へ戻る',
+                  onPressed: () {
+                    setState(() {
+                      _followRobot = true;
+                      _cameraCenterWorld = null;
+                    });
+                  },
+                  child: const Icon(Icons.my_location, size: 20),
                 ),
-                child: Text(
-                  _followRobot ? '全体図へ' : '自分拡大へ',
-                  style: const TextStyle(color: Colors.white, fontSize: 11),
+                const SizedBox(width: 6),
+                FloatingActionButton.small(
+                  heroTag: 'zoom_in_fab',
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF111827),
+                  tooltip: '拡大',
+                  onPressed: () {
+                    setState(() {
+                      _mapViewRadiusM = (_mapViewRadiusM * 0.75).clamp(0.8, 10.0);
+                    });
+                  },
+                  child: const Icon(Icons.add, size: 20),
                 ),
-              ),
+                const SizedBox(width: 6),
+                FloatingActionButton.small(
+                  heroTag: 'zoom_out_fab',
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF111827),
+                  tooltip: '縮小',
+                  onPressed: () {
+                    setState(() {
+                      _mapViewRadiusM = (_mapViewRadiusM / 0.75).clamp(0.8, 10.0);
+                    });
+                  },
+                  child: const Icon(Icons.remove, size: 20),
+                ),
+              ],
             ),
           ),
         Positioned(

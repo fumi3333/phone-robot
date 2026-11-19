@@ -43,6 +43,8 @@ void main() {
       // 初期モード: ① 歩いてマップ測定（ESP32 ボタンは表示されない）
       expect(find.text('① 歩いてマップ測定'), findsOneWidget);
       expect(find.text('② ラジコン操縦'), findsOneWidget);
+      expect(find.byKey(const Key('sensor_power_btn')), findsOneWidget);
+      expect(find.byKey(const Key('recenter_map_btn')), findsOneWidget);
       expect(find.byKey(const Key('record_toggle_btn')), findsOneWidget);
       expect(find.byKey(const Key('drive_send_btn')), findsOneWidget);
       expect(find.byKey(const Key('reset_map_btn')), findsOneWidget);

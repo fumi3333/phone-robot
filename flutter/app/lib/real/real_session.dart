@@ -46,8 +46,13 @@ class ObstacleAlert {
 ///   復帰しても走行は自動再開せず、次に走行を開始するときに現在位置
 ///   から再計画する（[handleAppResumed]）。
 class RealSession {
-  /// 標準の部屋スケール（6.0 m × 5.0 m、セル 5 cm）。
-  static const MappingParams roomParams = MappingParams();
+  /// 標準の部屋スケール（12.0 m × 12.0 m、セル 5 cm）。
+  static const MappingParams roomParams = MappingParams(
+    cellSize: 0.05,
+    gridW: 240,
+    gridH: 240,
+    targetCoverage: 0.80,
+  );
 
   /// 大学ワンフロア・廊下スケール（24.0 m × 24.0 m、セル 10 cm）。
   static const MappingParams floorParams = MappingParams(
@@ -117,6 +122,9 @@ class RealSession {
 
   DateTime? _sensorsStartedAt;
   DateTime? _lastCloseWallAt;
+  Pose? _lastRawPose;
+  double _originOffsetX = 0.0;
+  double _originOffsetY = 0.0;
   Timer? _watchdog;
 
   final _updates = StreamController<void>.broadcast();
@@ -274,9 +282,12 @@ class RealSession {
     );
   }
 
-  /// ARCore の相対座標（開始位置 (0, 0)）をグリッド中央基準の座標へ変換する。
-  Pose toGridPose(Pose raw) =>
-      Pose(raw.x + params.roomW / 2.0, raw.y + params.roomH / 2.0, raw.heading);
+  /// ARCore の相対座標（開始位置）をグリッド中央基準の座標へ変換する。
+  Pose toGridPose(Pose raw) => Pose(
+    raw.x + params.roomW / 2.0 - _originOffsetX,
+    raw.y + params.roomH / 2.0 - _originOffsetY,
+    raw.heading,
+  );
 
   void _notify() {
     // 高頻度のポーズ更新での再描画を 25fps (40ms) 上限で間引く
@@ -306,6 +317,7 @@ class RealSession {
     sensorHealth = '正常';
     _subs.add(
       poseSource.poses.listen((pose) {
+        _lastRawPose = pose;
         poseFeed.addPose(toGridPose(pose));
         _notify();
       }),
@@ -513,11 +525,21 @@ class RealSession {
   void resetMap() {
     if (driver.isBusy) return;
     isDemoMode = false;
+    final raw = _lastRawPose;
+    if (raw != null) {
+      // マップ消去時に現在位置をグリッド中央へ戻し、枠外切れを防ぐ
+      _originOffsetX = raw.x;
+      _originOffsetY = raw.y;
+      poseFeed.addPose(toGridPose(raw));
+    } else {
+      _originOffsetX = 0.0;
+      _originOffsetY = 0.0;
+    }
     grid.logOdds.fillRange(0, grid.logOdds.length, 0.0);
     goal = null;
     path = null;
     explored = false;
-    status = 'マップをリセットしました';
+    status = 'マップをリセットしました（現在位置を中央に配置）';
     _notify();
   }
 

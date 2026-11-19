@@ -371,6 +371,7 @@ class LogStorageManager(private val activity: Activity) {
                 lower.endsWith(".json") -> "application/json"
                 lower.endsWith(".md") -> "text/markdown"
                 lower.endsWith(".mp4") -> "video/mp4"
+                lower.endsWith(".apk") -> "application/vnd.android.package-archive"
                 else -> "application/octet-stream"
             }
         }

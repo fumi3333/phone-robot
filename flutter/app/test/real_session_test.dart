@@ -154,11 +154,11 @@ void main() {
   test('原点オフセット: ARCore (0, 0) をグリッド中央へ変換する', () {
     final roomSession = RealSession();
     final roomCenter = roomSession.toGridPose(Pose(0, 0, 1.57));
-    expect(roomCenter.x, closeTo(3.0, 1e-6));
-    expect(roomCenter.y, closeTo(2.5, 1e-6));
+    expect(roomCenter.x, closeTo(6.0, 1e-6));
+    expect(roomCenter.y, closeTo(6.0, 1e-6));
     expect(roomCenter.heading, closeTo(1.57, 1e-6));
     roomSession.poseFeed.addPose(roomCenter);
-    expect(roomSession.robotCell, (r: 50, c: 60));
+    expect(roomSession.robotCell, (r: 120, c: 120));
     roomSession.dispose();
 
     final floorSession = RealSession(customParams: RealSession.floorParams);

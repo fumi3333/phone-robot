@@ -22,6 +22,7 @@ class MapPainter extends CustomPainter {
   final MappingParams mappingParams;
   final bool followRobot;
   final double viewRadiusM;
+  final Offset? cameraCenterWorld;
 
   const MapPainter({
     required this.logOdds,
@@ -37,6 +38,7 @@ class MapPainter extends CustomPainter {
     this.mappingParams = const MappingParams(),
     this.followRobot = true,
     this.viewRadiusM = 2.5,
+    this.cameraCenterWorld,
   });
 
   /// 画面タップ座標を地図グリッドのセルに変換する。範囲外なら null。
@@ -47,14 +49,18 @@ class MapPainter extends CustomPainter {
     Pose? robotPose,
     bool followRobot = false,
     double viewRadiusM = 2.5,
+    Offset? cameraCenterWorld,
   }) {
     if (size.width <= 0 || size.height <= 0) return null;
     final int r;
     final int c;
-    if (followRobot && robotPose != null) {
+    final Offset? camCenter = (followRobot && robotPose != null)
+        ? Offset(robotPose.x, robotPose.y)
+        : cameraCenterWorld;
+    if (camCenter != null) {
       final pxPerM = math.min(size.width, size.height) / (2.0 * viewRadiusM);
-      final wx = robotPose.x + (tap.dx - size.width / 2.0) / pxPerM;
-      final wy = robotPose.y - (tap.dy - size.height / 2.0) / pxPerM;
+      final wx = camCenter.dx + (tap.dx - size.width / 2.0) / pxPerM;
+      final wy = camCenter.dy - (tap.dy - size.height / 2.0) / pxPerM;
       c = (wx / params.cellSize).floor();
       r = (wy / params.cellSize).floor();
     } else {
@@ -75,7 +81,10 @@ class MapPainter extends CustomPainter {
     canvas.clipRect(Offset.zero & size);
 
     final rp = robotPose;
-    final useFollow = followRobot && rp != null;
+    final Offset? camCenter = (followRobot && rp != null)
+        ? Offset(rp.x, rp.y)
+        : cameraCenterWorld;
+    final useCameraView = camCenter != null;
     final cs = mappingParams.cellSize;
 
     final double cw;
@@ -84,14 +93,14 @@ class MapPainter extends CustomPainter {
     late final Offset Function(double wx, double wy) worldToCanvas;
     late final Offset Function(Cell cell) centerOf;
 
-    if (useFollow) {
+    if (useCameraView) {
       pxPerM = math.min(size.width, size.height) / (2.0 * viewRadiusM);
       cw = cs * pxPerM;
       ch = cw;
       final cx = size.width / 2.0;
       final cy = size.height / 2.0;
       worldToCanvas = (wx, wy) =>
-          Offset(cx + (wx - rp.x) * pxPerM, cy - (wy - rp.y) * pxPerM);
+          Offset(cx + (wx - camCenter.dx) * pxPerM, cy - (wy - camCenter.dy) * pxPerM);
       centerOf = (cell) =>
           worldToCanvas((cell.c + 0.5) * cs, (cell.r + 0.5) * cs);
     } else {
@@ -104,7 +113,7 @@ class MapPainter extends CustomPainter {
           Offset((cell.c + 0.5) * cw, (gridH - 1 - cell.r + 0.5) * ch);
     }
 
-    final unknownPaint = Paint()..color = const Color(0xFFCBD5E1);
+    final unknownPaint = Paint()..color = const Color(0xFFE5E7EB);
     final freePaint = Paint()..color = Colors.white;
     final occPaint = Paint()..color = const Color(0xFFEF4444);
 
@@ -115,19 +124,19 @@ class MapPainter extends CustomPainter {
     var maxR = gridH - 1;
     var minC = 0;
     var maxC = gridW - 1;
-    if (useFollow) {
+    if (useCameraView) {
       final halfW = (size.width / 2.0) / pxPerM;
       final halfH = (size.height / 2.0) / pxPerM;
-      minC = ((rp.x - halfW) / cs).floor().clamp(0, gridW - 1);
-      maxC = ((rp.x + halfW) / cs).ceil().clamp(0, gridW - 1);
-      minR = ((rp.y - halfH) / cs).floor().clamp(0, gridH - 1);
-      maxR = ((rp.y + halfH) / cs).ceil().clamp(0, gridH - 1);
+      minC = ((camCenter.dx - halfW) / cs).floor().clamp(0, gridW - 1);
+      maxC = ((camCenter.dx + halfW) / cs).ceil().clamp(0, gridW - 1);
+      minR = ((camCenter.dy - halfH) / cs).floor().clamp(0, gridH - 1);
+      maxR = ((camCenter.dy + halfH) / cs).ceil().clamp(0, gridH - 1);
     }
 
     for (var r = minR; r <= maxR; r++) {
       final rowBase = r * gridW;
-      final top = useFollow
-          ? size.height / 2.0 - ((r + 1) * cs - rp.y) * pxPerM
+      final top = useCameraView
+          ? size.height / 2.0 - ((r + 1) * cs - camCenter.dy) * pxPerM
           : (gridH - 1 - r) * ch;
       var c = minC;
       while (c <= maxC) {
@@ -143,8 +152,8 @@ class MapPainter extends CustomPainter {
           if (nv == 0 || (nv < 0) != isFree) break;
           runEnd++;
         }
-        final left = useFollow
-            ? size.width / 2.0 + (c * cs - rp.x) * pxPerM
+        final left = useCameraView
+            ? size.width / 2.0 + (c * cs - camCenter.dx) * pxPerM
             : c * cw;
         final span = (runEnd - c) * cw;
         canvas.drawRect(
@@ -155,7 +164,7 @@ class MapPainter extends CustomPainter {
       }
     }
 
-    if (useFollow) {
+    if (useCameraView && rp != null) {
       final center = worldToCanvas(rp.x, rp.y);
       final ringPaint = Paint()
         ..color = const Color(0x5564748B)
@@ -275,16 +284,21 @@ class MapPainter extends CustomPainter {
     }
 
     final rc = rp != null ? worldToCanvas(rp.x, rp.y) : centerOf(robot);
-    final robotRadius = math.max(cw * 1.2, 6.5).clamp(6.5, 14.0).toDouble();
+    final robotRadius = math.max(cw * 1.2, 7.5).clamp(7.5, 13.0).toDouble();
+    canvas.drawCircle(
+      rc,
+      robotRadius + 2.5,
+      Paint()..color = Colors.white,
+    );
     canvas.drawCircle(
       rc,
       robotRadius,
-      Paint()..color = const Color(0xFF111827),
+      Paint()..color = const Color(0xFF1A73E8),
     );
     if (rp != null) {
       final tip = Offset(
-        rc.dx + math.cos(rp.heading) * (robotRadius * 1.8),
-        rc.dy - math.sin(rp.heading) * (robotRadius * 1.8),
+        rc.dx + math.cos(rp.heading) * (robotRadius * 1.7),
+        rc.dy - math.sin(rp.heading) * (robotRadius * 1.7),
       );
       canvas.drawLine(
         rc,
