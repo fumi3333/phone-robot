@@ -731,14 +731,13 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
     }
     return Container(
       color: Colors.black,
-      child: ClipRect(
-        child: FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: 640,
-            height: 480,
-            child: Texture(textureId: texId),
-          ),
+      alignment: Alignment.center,
+      child: FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox(
+          width: 640,
+          height: 480,
+          child: Texture(textureId: texId),
         ),
       ),
     );
@@ -811,11 +810,73 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
   Widget _buildStageArea() {
     final mainChild = _cameraMain ? _buildCameraWidget() : _buildMapWidget();
     final pipChild = _cameraMain ? _buildMapWidget() : _buildCameraWidget();
+    final alert = _session.obstacleAlert;
+    final isDanger =
+        _session.frontBrakeActive || alert.severity == ObstacleSeverity.danger;
+    final Color? signalColor = isDanger
+        ? const Color(0xFFEF4444)
+        : switch (alert.severity) {
+            ObstacleSeverity.clear => const Color(0xFF10B981),
+            ObstacleSeverity.caution => const Color(0xFFF59E0B),
+            ObstacleSeverity.danger => const Color(0xFFEF4444),
+            ObstacleSeverity.unknown => null,
+          };
+    final String? signalText = isDanger
+        ? '⛔ いけない'
+        : switch (alert.severity) {
+            ObstacleSeverity.clear => '✅ いける',
+            ObstacleSeverity.caution => '⚠️ ちゅうい',
+            ObstacleSeverity.danger => '⛔ いけない',
+            ObstacleSeverity.unknown => null,
+          };
 
     return Stack(
       fit: StackFit.expand,
       children: [
         mainChild,
+        if (signalColor != null)
+          IgnorePointer(
+            child: Container(
+              key: const Key('stage_signal_frame'),
+              decoration: BoxDecoration(
+                color: isDanger
+                    ? signalColor.withValues(alpha: 0.16)
+                    : signalColor.withValues(alpha: 0.06),
+                border: Border.all(
+                  color: signalColor,
+                  width: isDanger ? 7.0 : 5.0,
+                ),
+              ),
+            ),
+          ),
+        if (signalColor != null && signalText != null)
+          Positioned(
+            top: 8,
+            right: 8,
+            child: IgnorePointer(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 5,
+                ),
+                decoration: BoxDecoration(
+                  color: signalColor,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black26, blurRadius: 4),
+                  ],
+                ),
+                child: Text(
+                  signalText,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ),
+          ),
         Positioned(
           top: 8,
           left: 8,
