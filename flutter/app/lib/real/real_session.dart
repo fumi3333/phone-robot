@@ -251,7 +251,7 @@ class RealSession {
         message: 'カメラで前方を計測中…',
       );
     }
-    if (frontMin < 0.25) {
+    if (frontMin <= 0.25) {
       return ObstacleAlert(
         severity: ObstacleSeverity.danger,
         frontMinM: frontMin,
