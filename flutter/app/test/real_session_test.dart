@@ -403,4 +403,24 @@ void main() {
 
     session.dispose();
   });
+
+  test('車幅コリドー判定: 車幅(±12cm)の外にある物は通り抜け可として前進できる', () async {
+    final session = RealSession();
+    session.setSpeedNorm(1.0);
+
+    // ±24°〜±30° (i=0..2, 18..20) の外側に 0.30m の障害物があっても横ズレ >= 0.12m なので進める
+    final ranges = Float32List(21)..fillRange(0, 21, 2.5);
+    for (final i in [0, 1, 2, 18, 19, 20]) {
+      ranges[i] = 0.30; // 0.30 * sin(21°..30°) ≈ 0.11..0.15m
+    }
+    // 外側の 0.30m は sin(24°)=0.122m > 0.12m になる i=0,1,19,20 だけ残す
+    ranges[2] = 2.5;
+    ranges[18] = 2.5;
+    session.recordScanForTest(Scan(Pose(6.0, 6.0, math.pi / 2), ranges));
+    await session.jog('f');
+    expect(session.frontBrakeActive, isFalse);
+    expect(serialCalls.last.arguments['text'], 'c,255,0\n');
+
+    session.dispose();
+  });
 }

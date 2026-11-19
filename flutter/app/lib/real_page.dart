@@ -785,7 +785,19 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
         child: SizedBox(
           width: 640,
           height: 480,
-          child: Texture(textureId: texId),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Texture(textureId: texId),
+              CustomPaint(
+                painter: _CarGuidePainter(
+                  severity: _session.frontBrakeActive
+                      ? ObstacleSeverity.danger
+                      : _session.obstacleAlert.severity,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1744,4 +1756,54 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+/// カメラ映像上にバックモニター風の車幅ガイドライン（幅24cm相当の進路枠）を描く。
+class _CarGuidePainter extends CustomPainter {
+  final ObstacleSeverity severity;
+
+  const _CarGuidePainter({required this.severity});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final color = switch (severity) {
+      ObstacleSeverity.clear => const Color(0xFF10B981),
+      ObstacleSeverity.caution => const Color(0xFFF59E0B),
+      ObstacleSeverity.danger => const Color(0xFFEF4444),
+      ObstacleSeverity.unknown => const Color(0xFF94A3B8),
+    };
+    final linePaint = Paint()
+      ..color = color.withAlpha(220)
+      ..strokeWidth = 3.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    final w = size.width;
+    final h = size.height;
+    // 下端（手前）から画面中央やや下（奥）へ向かう車幅台形
+    final leftBottom = Offset(w * 0.24, h * 0.96);
+    final rightBottom = Offset(w * 0.76, h * 0.96);
+    final leftMid = Offset(w * 0.34, h * 0.72);
+    final rightMid = Offset(w * 0.66, h * 0.72);
+    final leftTop = Offset(w * 0.41, h * 0.54);
+    final rightTop = Offset(w * 0.59, h * 0.54);
+
+    canvas.drawLine(leftBottom, leftTop, linePaint);
+    canvas.drawLine(rightBottom, rightTop, linePaint);
+
+    // 距離目安の横ライン（手前35cm停止線 / 奥65cm減速線）
+    final stopPaint = Paint()
+      ..color = const Color(0xFFEF4444).withAlpha(190)
+      ..strokeWidth = 2.5;
+    canvas.drawLine(leftMid, rightMid, stopPaint);
+
+    final slowPaint = Paint()
+      ..color = color.withAlpha(160)
+      ..strokeWidth = 2.0;
+    canvas.drawLine(leftTop, rightTop, slowPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _CarGuidePainter oldDelegate) =>
+      oldDelegate.severity != severity;
 }

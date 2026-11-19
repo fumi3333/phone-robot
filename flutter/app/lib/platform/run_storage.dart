@@ -204,16 +204,21 @@ class RunRecorder {
   List<TrajectoryPoint> get trajectory => List.unmodifiable(_trajectory);
   List<CommandEffectSegment> get commandEffects => List.unmodifiable(_segments);
 
+  static const double carCorridorHalfWidthM = 0.12; // 実車幅11cm + 左右余裕6.5cm (幅24cm)
+
   static double? frontMinDepthM(Scan? scan) {
     if (scan == null || scan.ranges.isEmpty) return null;
     final n = scan.ranges.length;
-    final cStart = (n * 0.33).floor();
-    final cEnd = (n * 0.67).ceil().clamp(cStart, n - 1);
+    final halfFov = math.pi / 6; // ±30°
     final vals = <double>[];
-    for (var i = cStart; i <= cEnd; i++) {
+    for (var i = 0; i < n; i++) {
       final r = scan.ranges[i];
-      if (r.isFinite && r > 0) {
-        vals.add(r);
+      if (!r.isFinite || r <= 0) continue;
+      final theta = n == 1 ? 0.0 : -halfFov + (2 * halfFov) * i / (n - 1);
+      final lateralM = (r * math.sin(theta)).abs();
+      // 車幅24cmの進路コリドー内に入る障害物だけを抽出する
+      if (lateralM <= carCorridorHalfWidthM) {
+        vals.add(r * math.cos(theta));
       }
     }
     if (vals.isEmpty) return null;
