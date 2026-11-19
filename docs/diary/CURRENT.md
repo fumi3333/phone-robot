@@ -14,7 +14,7 @@
 ## リポジトリと公開の状態
 
 - GitHub: https://github.com/fumi3333/phone-robot （public、MIT）
-- 最新リリース v0.8.2 を公開済み（CI で全ユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
+- 最新リリース v0.9.3 を公開済み（CI で全 28 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
 - Zenn 記事3本を公開済み。記事3は Zennfes Autumn 2026「物理デバイスを使った開発」に応募済み（締切 2026-12-16）。
 
 ## ハードの状態（2026-11-15 時点）
@@ -82,6 +82,10 @@
   - `real_page.dart` / `MainActivity.kt` / `AndroidManifest.xml`: アプリ起動時はセンサー OFF（`📷 OFF/ON` トグル＆設定で自動開始可）へ変更し、設定シートから GitHub Releases の最新版をワンタップでダウンロード・インストールできるアプリ内アップデータ（`LogFileProvider` 経由）を追加。
   - `real_page.dart` / `ArCoreManager.kt` / `run_storage.dart`: カメラ表示を `BoxFit.contain`（引き画角）へ変更、画面周囲に緑（いける）／オレンジ（注意）／赤（いけない）の太枠オーバーレイを追加。`194527` で全435スキャンの44%が `0.23〜0.45m` と誤停止していた原因（床面・手前ノイズ）に対し、20cm未満＆俯角 `-0.05` 以下を除外し、正面2番目最小値・停止閾値 25cm（減速 55cm）へ調整。ラジコン画面にワンタップ `🤖 自動運転` ボタンを追加。
 - 2026-11-19 v0.8.2 usutaku ルール・Apple HIG 準拠の UI 簡素化（`38003c6`）: 画面・バナー・設定ボタン等から絵文字を全廃し、太めの文字と最小限の緑/赤枠だけの非AI・実用計器デザインに整理。
+- 2026-11-19 v0.9.0〜v0.9.3 車載時の誤検知排除・車幅24cm進路枠・その場停止化・早めブレーキ（`ccb9646`, `d306b42`, `f44e010`）:
+  - `ArCoreManager.kt`: 車載時のボンネット・箱・手前床の映り込みを除外するため `horizDist >= 0.28`, `wy >= -0.03`, `elevSlope >= -0.02` へ絞り、ToF 間隔を `120ms → 80ms`（約12.5Hz）へ高速化。
+  - `run_storage.dart` / `real_page.dart`: 停止判定を「車幅 24cm（左右 ±12cm）の進路コリドー内の距離」に限定して横の障害物は通り抜け可とし、カメラ映像上にバックモニター風の車幅ガイドラインを追加。起動時に自動で最新版をチェックして上部に1タップ `更新` バーを出す機能を追加。
+  - `real_driver.dart` / `real_session.dart`: `cruiseVfh` で前方接近時に逆舵バックしていた処理を廃止してその場停止（`'s'`）に変更し、停止距離を余裕のある `50cm`（減速開始 `90cm`、VFH 自律停止 `42cm`）に早めた。
 - 実機リスクの一覧は docs/note10plus-risks.md。R5（深度の視野角が近似値）は自宅で 1m 実測の較正が必要。
 
 ## 未確認のこと
