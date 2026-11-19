@@ -1,6 +1,6 @@
 # 現在の正（CURRENT）
 
-最終更新: 2026-11-18
+最終更新: 2026-11-19
 ここに書いてあることが「今の状態」。日記と食い違ったらこちらが正。
 2026-11-15 に、それ以前の記述（L298N 前提・未組み立て）を全面差し替えした。
 
@@ -14,7 +14,7 @@
 ## リポジトリと公開の状態
 
 - GitHub: https://github.com/fumi3333/phone-robot （public、MIT）
-- 最新リリース v0.7.1 を公開済み（CI で全 27 件のユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
+- 最新リリース v0.8.1 を公開済み（CI で全ユニットテスト通過・APK ビルド・リリース完了）。GitHub Pages の Web 版 HUD: https://fumi3333.github.io/phone-robot/
 - Zenn 記事3本を公開済み。記事3は Zennfes Autumn 2026「物理デバイスを使った開発」に応募済み（締切 2026-12-16）。
 
 ## ハードの状態（2026-11-15 時点）
@@ -77,6 +77,10 @@
 - 2026-11-18 v0.7.1 一次情報（OpenBot `openbot.ino` / Google ARCore 公式仕様）の調査結果を反映（`a2a386b`）:
   - `ArCoreManager.kt`: `camera.trackingState == TrackingState.TRACKING` のときだけ `computeRays()` を呼ぶようにし、トラッキング喪失中の `NotTrackingException` 例外負荷を回避（Depth 非対応フォールバックは `!depthSupported` で維持）。
   - `real_session.dart`: `ingestSerialTelemetry` を拡張し、従来の `v,<mV>` に加えて OpenBot 本家形式の小数V（`v8.42`）も受信・パース可能にした。
+- 2026-11-19 v0.8.0 / v0.8.1 Google ドライブ実測（`194425` / `194527`）解析と UX 刷新（`aa13348`, `4aac7e5`）:
+  - `real_session.dart` / `map_painter.dart` / `real_page.dart`: 部屋マップを `12.0m × 12.0m` へ拡大＋マップ消去時リセンター（`x_m = -0.73m` の枠外切れバグ解消）、Google マップ風パン・ピンチズーム・`◎` 現在地戻るボタン・`＋/−` ボタンを追加。
+  - `real_page.dart` / `MainActivity.kt` / `AndroidManifest.xml`: アプリ起動時はセンサー OFF（`📷 OFF/ON` トグル＆設定で自動開始可）へ変更し、設定シートから GitHub Releases の最新版をワンタップでダウンロード・インストールできるアプリ内アップデータ（`LogFileProvider` 経由）を追加。
+  - `real_page.dart` / `ArCoreManager.kt` / `run_storage.dart`: カメラ表示を `BoxFit.contain`（引き画角）へ変更、画面周囲に緑（いける）／オレンジ（注意）／赤（いけない）の太枠オーバーレイを追加。`194527` で全435スキャンの44%が `0.23〜0.45m` と誤停止していた原因（床面・手前ノイズ）に対し、20cm未満＆俯角 `-0.05` 以下を除外し、正面2番目最小値・停止閾値 25cm（減速 55cm）へ調整。ラジコン画面にワンタップ `🤖 自動運転` ボタンを追加。
 - 実機リスクの一覧は docs/note10plus-risks.md。R5（深度の視野角が近似値）は自宅で 1m 実測の較正が必要。
 
 ## 未確認のこと
