@@ -316,7 +316,7 @@ void main() {
     session.dispose();
   });
 
-  test('前方安全ブレーキ: 65cm以内で減速、35cm未満で停止し後退は許可、45cm以上で再開', () async {
+  test('前方安全ブレーキ: 90cm以内で減速、50cm未満で停止し後退は許可、65cm以上で再開', () async {
     final session = RealSession();
     session.setSpeedNorm(1.0); // PWM 255
     expect(session.frontBrakeEnabled, isTrue);
@@ -330,8 +330,8 @@ void main() {
       return Scan(Pose(3.0, 2.5, math.pi / 2), ranges);
     }
 
-    // 1. 0.50m（減速帯 0.35..0.65m）: フル 255 より減速した値で前進
-    session.recordScanForTest(scanAt(0.50));
+    // 1. 0.70m（減速帯 0.50..0.90m）: フル 255 より減速した値で前進
+    session.recordScanForTest(scanAt(0.70));
     await session.jog('f');
     expect(session.frontBrakeActive, isFalse);
     final slowCmd = serialCalls.last.arguments['text'] as String;
@@ -340,13 +340,13 @@ void main() {
     expect(slowPwm, greaterThanOrEqualTo(SerialCommandScale.minEffectiveDrivePwm));
     expect(slowPwm, lessThan(255));
 
-    // 2. 0.30m（35cm未満）: 強制停止 's' が送られ、frontBrakeActive = true
-    session.recordScanForTest(scanAt(0.30));
+    // 2. 0.40m（50cm未満）: 強制停止 's' が送られ、frontBrakeActive = true
+    session.recordScanForTest(scanAt(0.40));
     expect(session.frontBrakeActive, isTrue);
     expect(serialCalls.last.arguments['text'], 's');
 
-    // 3. 0.40m（ヒステリシス帯 0.35..0.45m）: まだ前進は禁止だが後退 'b' は許可
-    session.recordScanForTest(scanAt(0.40));
+    // 3. 0.58m（ヒステリシス帯 0.50..0.65m）: まだ前進は禁止だが後退 'b' は許可
+    session.recordScanForTest(scanAt(0.58));
     await session.jog('f');
     expect(session.frontBrakeActive, isTrue);
     expect(serialCalls.last.arguments['text'], 's');
@@ -354,8 +354,8 @@ void main() {
     await session.jog('b');
     expect(serialCalls.last.arguments['text'], 'c,-255,0\n');
 
-    // 4. 0.50m（0.45m以上）: ブレーキ解除され前進再開
-    session.recordScanForTest(scanAt(0.50));
+    // 4. 0.70m（0.65m以上）: ブレーキ解除され前進再開
+    session.recordScanForTest(scanAt(0.70));
     await session.jog('f');
     expect(session.frontBrakeActive, isFalse);
     expect((serialCalls.last.arguments['text'] as String).startsWith('c,'), isTrue);

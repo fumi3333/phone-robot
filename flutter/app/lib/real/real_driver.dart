@@ -879,13 +879,13 @@ class RealDriver {
         }
 
         // 車幅コリドー（±12cm）内の前方障害物距離（2番目最小値で単発ノイズを除外）
-        const halfFov = math.pi / 6;
+        final corridorHalfFov = p.fovRad / 2.0;
         final corridorVals = <double>[];
         for (var i = 0; i < nRays; i++) {
           final r = scan.ranges[i];
           if (!r.isFinite || r <= 0) continue;
           final theta =
-              nRays == 1 ? 0.0 : -halfFov + (2 * halfFov) * i / (nRays - 1);
+              nRays == 1 ? 0.0 : -corridorHalfFov + (2 * corridorHalfFov) * i / (nRays - 1);
           final lateralM = (r * math.sin(theta)).abs();
           if (lateralM <= 0.12) {
             corridorVals.add(r * math.cos(theta));
@@ -897,7 +897,7 @@ class RealDriver {
             : (corridorVals.length >= 2 ? corridorVals[1] : corridorVals[0]);
 
         final frontBlocked =
-            _proximityBlocked || (centerMin != null && centerMin <= 0.35);
+            _proximityBlocked || (centerMin != null && centerMin <= 0.50);
 
         if (frontBlocked) {
           hudTargetHeading = null;

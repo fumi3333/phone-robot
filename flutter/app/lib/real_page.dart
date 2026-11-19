@@ -1605,7 +1605,7 @@ class _RealPageState extends State<RealPage> with WidgetsBindingObserver {
                 onSelected: (v) => _session.setFrontBrakeEnabled(v),
                 label: Text(
                   _session.frontBrakeEnabled
-                      ? '壁停止 ON (35cm)'
+                      ? '壁停止 ON (50cm)'
                       : '壁停止 OFF',
                   style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
                 ),

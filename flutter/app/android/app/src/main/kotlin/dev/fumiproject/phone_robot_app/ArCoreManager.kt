@@ -78,7 +78,7 @@ class ArCoreManager(
         private const val FRAME_INTERVAL_MS = 33L
         private const val POSE_INTERVAL_MS = 33L
         private const val PREVIEW_INTERVAL_MS = 100L
-        private const val DEPTH_INTERVAL_MS = 120L
+        private const val DEPTH_INTERVAL_MS = 80L
         private const val THERMAL_PREVIEW_INTERVAL_MS = 250L
         private const val THERMAL_DEPTH_INTERVAL_MS = 300L
         private const val FALLBACK_INTERVAL_MS = 1000L
