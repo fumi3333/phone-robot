@@ -897,7 +897,7 @@ class RealDriver {
             : (corridorVals.length >= 2 ? corridorVals[1] : corridorVals[0]);
 
         final frontBlocked =
-            _proximityBlocked || (centerMin != null && centerMin <= 0.50);
+            _proximityBlocked || (centerMin != null && centerMin <= 0.42);
 
         if (frontBlocked) {
           hudTargetHeading = null;
