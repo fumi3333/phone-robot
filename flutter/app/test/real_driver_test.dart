@@ -398,7 +398,7 @@ void main() {
     }
   });
 
-  test('cruiseVfh: 開けた左廊下へ操舵し、前方接近で逆ステア後退回避する', () async {
+  test('cruiseVfh: 開けた左廊下へ操舵し、前方接近時はバックせずその場で停止する', () async {
     final link = FakeLink();
     final poseFeed = PoseFeed()..setTrackingState('TRACKING');
     final feed = ScanFeed();
@@ -445,6 +445,7 @@ void main() {
       });
       expect(hasLeftTurn, isTrue);
 
+      final countBeforeBlock = link.sent.length;
       // 今度は前方中央が 0.25m に詰まる（左は開いている）
       ranges = Float32List.fromList(
         List.generate(21, (i) {
@@ -453,18 +454,18 @@ void main() {
           return 0.4;
         }),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 550));
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final afterBlock = link.sent.sublist(countBeforeBlock);
       await driver.stop();
       await cruiseFuture;
 
-      final allCmds = link.sent.where((s) => s.startsWith('c,')).toList();
-      final hasAvoidReverse = allCmds.any((c) {
+      // 後退コマンド（drive < 0）を送らず、停止 's' で止まること
+      expect(afterBlock.contains('s'), isTrue);
+      final hasReverse = afterBlock.where((s) => s.startsWith('c,')).any((c) {
         final parts = c.trim().split(',');
-        return int.parse(parts[1]) <=
-                -SerialCommandScale.minEffectiveDrivePwm &&
-            int.parse(parts[2]) == -255;
+        return int.parse(parts[1]) < 0;
       });
-      expect(hasAvoidReverse, isTrue);
+      expect(hasReverse, isFalse);
     } finally {
       t.cancel();
     }

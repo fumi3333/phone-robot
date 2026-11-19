@@ -878,61 +878,35 @@ class RealDriver {
           return r.clamp(0.05, p.maxRange);
         }
 
-        // 前方中央コーン（通常 7..13, -9°..+9°）の最小実測距離
-        final cStart = (nRays * 0.33).floor();
-        final cEnd = (nRays * 0.67).ceil().clamp(cStart, nRays - 1);
-        double? centerMin;
-        for (var i = cStart; i <= cEnd; i++) {
+        // 車幅コリドー（±12cm）内の前方障害物距離（2番目最小値で単発ノイズを除外）
+        final corridorVals = <double>[];
+        for (var i = 0; i < nRays; i++) {
           final r = scan.ranges[i];
-          if (r.isFinite && r > 0) {
-            centerMin = centerMin == null ? r : math.min(centerMin, r);
+          if (!r.isFinite || r <= 0) continue;
+          final theta =
+              nRays == 1 ? 0.0 : -p.halfFov + (2 * p.halfFov) * i / (nRays - 1);
+          final lateralM = (r * math.sin(theta)).abs();
+          if (lateralM <= 0.12) {
+            corridorVals.add(r * math.cos(theta));
           }
         }
+        corridorVals.sort();
+        final double? centerMin = corridorVals.isEmpty
+            ? null
+            : (corridorVals.length >= 2 ? corridorVals[1] : corridorVals[0]);
 
         final frontBlocked =
-            _proximityBlocked || (centerMin != null && centerMin < 0.32);
+            _proximityBlocked || (centerMin != null && centerMin <= 0.35);
 
         if (frontBlocked) {
-          // 左右それぞれの自由空間を比較し、広い側へ鼻先が向くよう逆舵バック
-          final wing = math.max(1, nRays ~/ 3);
-          var rightSum = 0.0;
-          for (var i = 0; i < wing; i++) {
-            rightSum += rayDist(i);
-          }
-          var leftSum = 0.0;
-          for (var i = nRays - wing; i < nRays; i++) {
-            leftSum += rayDist(i);
-          }
-          final rightAvg = rightSum / wing;
-          final leftAvg = leftSum / wing;
-          // 左へ回頭したい場合は後退中に右ステア (-1.0) を切る
-          final reverseSteer = leftAvg >= rightAvg ? -1.0 : 1.0;
-
           hudTargetHeading = null;
           hudTargetDistM = centerMin ?? proximityStopM;
           _status(
-            '前方接近（${(centerMin ?? proximityStopM).toStringAsFixed(2)} m）: '
-            '自動切り返しバック中',
+            '前方停止（${(centerMin ?? proximityStopM).toStringAsFixed(2)} m）',
           );
           await link.sendJog('s');
-          await Future<void>.delayed(const Duration(milliseconds: 120));
-          var sentOk = true;
-          for (var step = 0; step < 4 && !_aborted; step++) {
-            if (_checkLink() != null) {
-              sentOk = false;
-              break;
-            }
-            if (!await _sendNorm(-math.min(cruiseDrive, 0.55), reverseSteer)) {
-              lastStopReason = 'link-lost';
-              _status('指令の送信に失敗しました（リンク切断の疑い）。停止します');
-              sentOk = false;
-              break;
-            }
-            await Future<void>.delayed(const Duration(milliseconds: 100));
-          }
-          await link.sendJog('s');
-          if (!sentOk || _aborted) break;
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          if (_aborted) break;
           applyScanIfMoved();
           onFrame?.call(Float32List.fromList(grid.logOdds), currentCell);
           continue;
